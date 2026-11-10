@@ -18,7 +18,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Oldest supported runner: glibc 2.35, so the binary also runs on Debian 12 (2.36) and
+          # Ubuntu 22.04+ (ubuntu-latest links against glibc 2.39 symbols).
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc

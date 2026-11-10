@@ -1122,8 +1122,10 @@ async fn test_opus_goes_out_every_20_ms_and_stops_with_silence() {
     let last = audio.last().unwrap();
     let span = last.0.duration_since(first.0).as_secs_f64() * 1000.0;
     let average = span / (audio.len() - 1) as f64;
+    // Shared CI runners add scheduler jitter (macOS measured 22.08 ms once); a real pacing bug
+    // shows up as ~10 ms or ~40 ms.
     assert!(
-        (18.0..=22.0).contains(&average),
+        (18.0..=24.0).contains(&average),
         "Opus every 20 ms on average, got {average:.2} ms over {} packets",
         audio.len()
     );

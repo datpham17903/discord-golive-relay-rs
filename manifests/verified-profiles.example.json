@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "note": "Example only. Copy to verified-profiles.json next to the config and list a profile only after it was verified live on that exact relay account and guild.",
+  "profiles": [
+    {
+      "relay_user_id": "100000000000000001",
+      "guild_id": "100000000000000002",
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "verified_on": "YYYY-MM-DD",
+      "evidence": "path or note of the live G2b/M4 run"
+    }
+  ]
+}

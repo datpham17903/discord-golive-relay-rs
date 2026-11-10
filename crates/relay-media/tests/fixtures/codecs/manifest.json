@@ -1,0 +1,336 @@
+{
+  "formats": {
+    "h264": "Annex-B access unit (start codes), keyframe has SPS/PPS in-band",
+    "h265": "Annex-B access unit (start codes), keyframe has VPS/SPS/PPS in-band",
+    "av1": "low-overhead OBU temporal unit (obu_has_size_field=1); starts with temporal delimiter 12 00",
+    "vp8": "raw VP8 frame",
+    "vp9": "raw VP9 frame",
+    "opus": "raw Opus packet (TOC byte first)"
+  },
+  "files": [
+    {
+      "file": "h264_1920x1080_key.bin",
+      "media": "video",
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "keyframe": true,
+      "bytes": 118566
+    },
+    {
+      "file": "h264_1920x1080_delta.bin",
+      "media": "video",
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "keyframe": false,
+      "bytes": 6178
+    },
+    {
+      "file": "h264_1280x720_key.bin",
+      "media": "video",
+      "codec": "h264",
+      "width": 1280,
+      "height": 720,
+      "keyframe": true,
+      "bytes": 54225
+    },
+    {
+      "file": "h264_1280x720_delta.bin",
+      "media": "video",
+      "codec": "h264",
+      "width": 1280,
+      "height": 720,
+      "keyframe": false,
+      "bytes": 2981
+    },
+    {
+      "file": "h265_1920x1080_key.bin",
+      "media": "video",
+      "codec": "h265",
+      "width": 1920,
+      "height": 1080,
+      "keyframe": true,
+      "bytes": 111956
+    },
+    {
+      "file": "h265_1920x1080_delta.bin",
+      "media": "video",
+      "codec": "h265",
+      "width": 1920,
+      "height": 1080,
+      "keyframe": false,
+      "bytes": 4933
+    },
+    {
+      "file": "h265_1280x720_key.bin",
+      "media": "video",
+      "codec": "h265",
+      "width": 1280,
+      "height": 720,
+      "keyframe": true,
+      "bytes": 51070
+    },
+    {
+      "file": "h265_1280x720_delta.bin",
+      "media": "video",
+      "codec": "h265",
+      "width": 1280,
+      "height": 720,
+      "keyframe": false,
+      "bytes": 2398
+    },
+    {
+      "file": "av1_1920x1080_key.bin",
+      "media": "video",
+      "codec": "av1",
+      "width": 1920,
+      "height": 1080,
+      "keyframe": true,
+      "bytes": 286352
+    },
+    {
+      "file": "av1_1920x1080_delta.bin",
+      "media": "video",
+      "codec": "av1",
+      "width": 1920,
+      "height": 1080,
+      "keyframe": false,
+      "bytes": 1418
+    },
+    {
+      "file": "av1_1280x720_key.bin",
+      "media": "video",
+      "codec": "av1",
+      "width": 1280,
+      "height": 720,
+      "keyframe": true,
+      "bytes": 115062
+    },
+    {
+      "file": "av1_1280x720_delta.bin",
+      "media": "video",
+      "codec": "av1",
+      "width": 1280,
+      "height": 720,
+      "keyframe": false,
+      "bytes": 829
+    },
+    {
+      "file": "vp8_1920x1080_key.bin",
+      "media": "video",
+      "codec": "vp8",
+      "width": 1920,
+      "height": 1080,
+      "keyframe": true,
+      "bytes": 79484
+    },
+    {
+      "file": "vp8_1920x1080_delta.bin",
+      "media": "video",
+      "codec": "vp8",
+      "width": 1920,
+      "height": 1080,
+      "keyframe": false,
+      "bytes": 2469
+    },
+    {
+      "file": "vp8_1280x720_key.bin",
+      "media": "video",
+      "codec": "vp8",
+      "width": 1280,
+      "height": 720,
+      "keyframe": true,
+      "bytes": 53597
+    },
+    {
+      "file": "vp8_1280x720_delta.bin",
+      "media": "video",
+      "codec": "vp8",
+      "width": 1280,
+      "height": 720,
+      "keyframe": false,
+      "bytes": 388
+    },
+    {
+      "file": "vp9_1920x1080_key.bin",
+      "media": "video",
+      "codec": "vp9",
+      "width": 1920,
+      "height": 1080,
+      "keyframe": true,
+      "bytes": 342464
+    },
+    {
+      "file": "vp9_1920x1080_delta.bin",
+      "media": "video",
+      "codec": "vp9",
+      "width": 1920,
+      "height": 1080,
+      "keyframe": false,
+      "bytes": 6696
+    },
+    {
+      "file": "vp9_1280x720_key.bin",
+      "media": "video",
+      "codec": "vp9",
+      "width": 1280,
+      "height": 720,
+      "keyframe": true,
+      "bytes": 155065
+    },
+    {
+      "file": "vp9_1280x720_delta.bin",
+      "media": "video",
+      "codec": "vp9",
+      "width": 1280,
+      "height": 720,
+      "keyframe": false,
+      "bytes": 3302
+    },
+    {
+      "file": "opus_mono_10ms.bin",
+      "media": "audio",
+      "codec": "opus",
+      "keyframe": false,
+      "bytes": 75,
+      "source": "libopus",
+      "duration_ms": 10.0,
+      "channels": "mono",
+      "mode": "celt",
+      "frames": 1
+    },
+    {
+      "file": "opus_mono_20ms.bin",
+      "media": "audio",
+      "codec": "opus",
+      "keyframe": false,
+      "bytes": 184,
+      "source": "libopus",
+      "duration_ms": 20.0,
+      "channels": "mono",
+      "mode": "celt",
+      "frames": 1
+    },
+    {
+      "file": "opus_mono_40ms.bin",
+      "media": "audio",
+      "codec": "opus",
+      "keyframe": false,
+      "bytes": 319,
+      "source": "libopus",
+      "duration_ms": 40.0,
+      "channels": "mono",
+      "mode": "celt",
+      "frames": 2
+    },
+    {
+      "file": "opus_mono_60ms.bin",
+      "media": "audio",
+      "codec": "opus",
+      "keyframe": false,
+      "bytes": 479,
+      "source": "libopus",
+      "duration_ms": 60.0,
+      "channels": "mono",
+      "mode": "celt",
+      "frames": 3
+    },
+    {
+      "file": "opus_stereo_10ms.bin",
+      "media": "audio",
+      "codec": "opus",
+      "keyframe": false,
+      "bytes": 118,
+      "source": "libopus",
+      "duration_ms": 10.0,
+      "channels": "stereo",
+      "mode": "celt",
+      "frames": 1
+    },
+    {
+      "file": "opus_stereo_20ms.bin",
+      "media": "audio",
+      "codec": "opus",
+      "keyframe": false,
+      "bytes": 315,
+      "source": "libopus",
+      "duration_ms": 20.0,
+      "channels": "stereo",
+      "mode": "celt",
+      "frames": 1
+    },
+    {
+      "file": "opus_stereo_40ms.bin",
+      "media": "audio",
+      "codec": "opus",
+      "keyframe": false,
+      "bytes": 479,
+      "source": "libopus",
+      "duration_ms": 40.0,
+      "channels": "stereo",
+      "mode": "celt",
+      "frames": 2
+    },
+    {
+      "file": "opus_stereo_60ms.bin",
+      "media": "audio",
+      "codec": "opus",
+      "keyframe": false,
+      "bytes": 719,
+      "source": "libopus",
+      "duration_ms": 60.0,
+      "channels": "stereo",
+      "mode": "celt",
+      "frames": 3
+    },
+    {
+      "file": "opus_synth_silk_20ms_mono.bin",
+      "media": "audio",
+      "codec": "opus",
+      "keyframe": false,
+      "bytes": 40,
+      "source": "synthetic",
+      "duration_ms": 20.0,
+      "channels": "mono",
+      "mode": "silk",
+      "frames": 1
+    },
+    {
+      "file": "opus_synth_hybrid_20ms_stereo.bin",
+      "media": "audio",
+      "codec": "opus",
+      "keyframe": false,
+      "bytes": 40,
+      "source": "synthetic",
+      "duration_ms": 20.0,
+      "channels": "stereo",
+      "mode": "hybrid",
+      "frames": 1
+    },
+    {
+      "file": "opus_synth_code2_celt_2x10ms.bin",
+      "media": "audio",
+      "codec": "opus",
+      "keyframe": false,
+      "bytes": 31,
+      "source": "synthetic",
+      "duration_ms": 20.0,
+      "channels": "mono",
+      "mode": "celt",
+      "frames": 2
+    },
+    {
+      "file": "opus_synth_code3_celt_20ms_x3.bin",
+      "media": "audio",
+      "codec": "opus",
+      "keyframe": false,
+      "bytes": 61,
+      "source": "synthetic",
+      "duration_ms": 60.0,
+      "channels": "mono",
+      "mode": "celt",
+      "frames": 3
+    }
+  ]
+}

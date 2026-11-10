@@ -1,0 +1,17 @@
+[package]
+name = "relay-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fs4.workspace = true
+relay-media = { path = "../relay-media" }
+indexmap.workspace = true
+parking_lot.workspace = true
+saphyr.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "net"] }

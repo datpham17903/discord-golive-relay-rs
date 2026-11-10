@@ -1,0 +1,11 @@
+[package]
+name = "relay-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+serde_json.workspace = true

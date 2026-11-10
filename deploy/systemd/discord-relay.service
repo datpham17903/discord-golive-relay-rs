@@ -1,0 +1,23 @@
+[Unit]
+Description=Discord Relay (single-target Go Live relay)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=discord-relay
+LoadCredential=relay-token:/etc/discord-relay/token
+ExecStart=/opt/discord-relay/relayctl run --config /etc/discord-relay/config.yaml
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=78
+TimeoutStopSec=20
+LimitCORE=0
+StateDirectory=discord-relay
+ReadOnlyPaths=/etc/discord-relay
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

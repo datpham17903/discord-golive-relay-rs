@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "python": "3.14.7",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "pyav": "19.0.2",
+  "libav": {
+    "libavutil": "61.1.102",
+    "libavcodec": "63.1.102",
+    "libavformat": "63.1.102",
+    "libavdevice": "63.1.102",
+    "libavfilter": "12.1.102",
+    "libswscale": "10.1.102",
+    "libswresample": "7.1.102"
+  },
+  "discord.py-self": {
+    "source": "git+https://github.com/dolfies/discord.py-self",
+    "commit": "2ba64a9a997e151a9c259984e0a179b1fdf4aff4",
+    "version": "2.2.0a5340+g2ba64a9a"
+  },
+  "discord-native-voice": {
+    "version": "0.1.1",
+    "tag_commit": "18bbd204bfe46a781bee37cc8c10d574bdf435dd",
+    "install_note": "install with --no-deps: wheel requires discord.py-self>=2.2.0, which the 2.2.0a pre-release does not satisfy"
+  },
+  "pyav_codecs": {
+    "decode": [
+      "h264",
+      "hevc",
+      "vp8",
+      "vp9",
+      "av1(libdav1d)",
+      "opus"
+    ],
+    "encode": [
+      "libx264",
+      "libopus"
+    ],
+    "missing": [
+      "libaom-av1"
+    ]
+  },
+  "checks": {
+    "smoke_import": "pass (2026-11-01, Windows 11, Python 3.14.7)",
+    "libx264_forced_idr": "pass: pict_type=I with forced-idr=1 yields NAL 5 + SPS/PPS"
+  },
+  "note": "G0 run on the Windows dev machine; repeat on the Linux VPS target before G2b benchmarking"
+}

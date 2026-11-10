@@ -1,0 +1,177 @@
+{
+ "decoder": "PyAV 19.0.2 h264",
+ "cases": [
+  {
+   "width": 160,
+   "height": 96,
+   "fps": 15,
+   "variants": [
+    {
+     "frames": 15,
+     "decoded_width": 160,
+     "decoded_height": 96,
+     "sha256_yuv": "159d65152e579d661470a6bec958b3b3ce90a085d3967169e862e72645e75ec5",
+     "y": {
+      "min": 128,
+      "max": 128
+     },
+     "u": {
+      "min": 128,
+      "max": 128
+     },
+     "v": {
+      "min": 128,
+      "max": 128
+     }
+    },
+    {
+     "frames": 15,
+     "decoded_width": 160,
+     "decoded_height": 96,
+     "sha256_yuv": "159d65152e579d661470a6bec958b3b3ce90a085d3967169e862e72645e75ec5",
+     "y": {
+      "min": 128,
+      "max": 128
+     },
+     "u": {
+      "min": 128,
+      "max": 128
+     },
+     "v": {
+      "min": 128,
+      "max": 128
+     }
+    }
+   ]
+  },
+  {
+   "width": 202,
+   "height": 118,
+   "fps": 25,
+   "variants": [
+    {
+     "frames": 25,
+     "decoded_width": 202,
+     "decoded_height": 118,
+     "sha256_yuv": "526e16b3c5c934afc18fb02a23f3db35d36d631e3f7248679ed2c4d8d521305d",
+     "y": {
+      "min": 128,
+      "max": 128
+     },
+     "u": {
+      "min": 128,
+      "max": 128
+     },
+     "v": {
+      "min": 128,
+      "max": 128
+     }
+    },
+    {
+     "frames": 25,
+     "decoded_width": 202,
+     "decoded_height": 118,
+     "sha256_yuv": "526e16b3c5c934afc18fb02a23f3db35d36d631e3f7248679ed2c4d8d521305d",
+     "y": {
+      "min": 128,
+      "max": 128
+     },
+     "u": {
+      "min": 128,
+      "max": 128
+     },
+     "v": {
+      "min": 128,
+      "max": 128
+     }
+    }
+   ]
+  },
+  {
+   "width": 1280,
+   "height": 720,
+   "fps": 60,
+   "variants": [
+    {
+     "frames": 60,
+     "decoded_width": 1280,
+     "decoded_height": 720,
+     "sha256_yuv": "9cf6490e82c9bf53ea484dcaf03298bca2405d8229b7dfd65bd53d3b8c73bb75",
+     "y": {
+      "min": 128,
+      "max": 128
+     },
+     "u": {
+      "min": 128,
+      "max": 128
+     },
+     "v": {
+      "min": 128,
+      "max": 128
+     }
+    },
+    {
+     "frames": 60,
+     "decoded_width": 1280,
+     "decoded_height": 720,
+     "sha256_yuv": "9cf6490e82c9bf53ea484dcaf03298bca2405d8229b7dfd65bd53d3b8c73bb75",
+     "y": {
+      "min": 128,
+      "max": 128
+     },
+     "u": {
+      "min": 128,
+      "max": 128
+     },
+     "v": {
+      "min": 128,
+      "max": 128
+     }
+    }
+   ]
+  },
+  {
+   "width": 1920,
+   "height": 1080,
+   "fps": 30,
+   "variants": [
+    {
+     "frames": 30,
+     "decoded_width": 1920,
+     "decoded_height": 1080,
+     "sha256_yuv": "023f7477a945d9e777b0c3a893350f33137e3a41df8795cd2556a4762e723ad8",
+     "y": {
+      "min": 128,
+      "max": 128
+     },
+     "u": {
+      "min": 128,
+      "max": 128
+     },
+     "v": {
+      "min": 128,
+      "max": 128
+     }
+    },
+    {
+     "frames": 30,
+     "decoded_width": 1920,
+     "decoded_height": 1080,
+     "sha256_yuv": "023f7477a945d9e777b0c3a893350f33137e3a41df8795cd2556a4762e723ad8",
+     "y": {
+      "min": 128,
+      "max": 128
+     },
+     "u": {
+      "min": 128,
+      "max": 128
+     },
+     "v": {
+      "min": 128,
+      "max": 128
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,25 @@
+[package]
+name = "relayctl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+indexmap.workspace = true
+parking_lot.workspace = true
+relay-core = { path = "../relay-core" }
+relay-discord = { path = "../relay-discord" }
+relay-media = { path = "../relay-media" }
+relay-voice = { path = "../relay-voice" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "net"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+wiremock.workspace = true
+
+[lints]
+workspace = true

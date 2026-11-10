@@ -1,0 +1,86 @@
+# Example only: IDs below are dummy numeric strings; replace with real snowflakes.
+schema_version: 1
+
+discord:
+  # expected_relay_user_id: "100000000000000001"   # optional: set it to pin the ingest account; it is checked at login
+  guild_id: "100000000000000002"
+  target_user_id: "100000000000000003"
+  allowed_voice_channel_id: "100000000000000004"
+  ingest_credential: relay-token   # credential name of the account that watches the target
+  ingest_publishes: true           # the ingest account also publishes its own Go Live
+  relay_accounts: []               # extra Go Lives in the main channel, started as viewers grow (relay + mirror at most 9), e.g.:
+  #  - {credential: relay-token-2}                                # user IDs are read from the tokens at startup
+  mirror_accounts: []              # Go Lives in other voice channels, one account per channel; channel_id optional, e.g.:
+  #  - {credential: relay-token-3, channel_id: "100000000000000007"}
+  #  - {user_id: "100000000000000006", credential: relay-token-4}  # user_id optional: pins the account, checked at login
+
+authorization:
+  agreement_ref: "local-agreement-record"
+  excluded_viewer_ids: []
+
+codecs:
+  parent_codecs: h264_only   # auto_decode | h264_only; h264_only makes Discord pick H.264 for the target's stream
+  watch_codecs: h264_only    # (it chooses a codec every participant decodes) so passthrough always applies; both ignored when output_codec is adaptive
+  output_codec: adaptive     # adaptive | H264; adaptive forwards the target's video in the best codec every viewer of every output decodes (AV1 > H265 > H264 > VP8 > VP9), H264 is the old fixed mode
+  output_rids: 1
+  video_encoder: auto        # auto | libx264 | h264_nvenc | h264_amf | h264_qsv | h264_mf | h264_videotoolbox | h264_vaapi
+  hw_decode: none            # none | auto | <device type, e.g. d3d11va, cuda>; auto can be slower on a busy iGPU
+  video_mode: passthrough    # transcode | passthrough; passthrough forwards the target's video as-is (near-zero CPU, lower latency; every codec with output_codec adaptive, only H.264 with output_codec H264) but keeps its bitrate (Discord error 2003 if too high); keyframes come from PLI to the target; sources larger than max_* fall back to H.264 transcode
+  audio_mode: passthrough    # transcode | passthrough; passthrough forwards the target's Opus as-is (its own bitrate, audio_bitrate_kbps unused); transcode re-encodes at audio_bitrate_kbps
+
+quality:
+  mode: auto                 # auto | fixed; auto passes the source through up to max_* (larger sources are scaled down); fixed always outputs fixed_* (other sizes are re-encoded, which costs CPU)
+  max_width: 2560            # max_* only used in auto; up to 1440p60 is passed through (1080p60 validated live G2b 2026-11-01)
+  max_height: 1440
+  max_fps: 60
+  fixed_width: 1920          # fixed_* only used in fixed
+  fixed_height: 1080
+  fixed_fps: 60
+  video_bitrate_kbps: auto   # auto | kbps; only used when re-encoding (passthrough keeps the target's own bitrate). auto: ~7.8 Mbps at 1080p60, 12 Mbps at 1440p60 (cap; 20000 caused Discord error 2003 in G2b)
+  audio_bitrate_kbps: 128    # used only with codecs.audio_mode: transcode
+  approved_profile_manifest: "manifests/verified-profiles.json"
+
+audio:
+  enabled: true
+  source: target_stream_only
+
+runtime:
+  start_debounce_ms: 100
+  idle_voice_grace_seconds: 30
+  hold_recovery_timeout_seconds: 15
+  connect_timeout_seconds: 15
+  first_media_timeout_seconds: 10
+  retry_delays_seconds: [1, 2, 4, 8, 15]
+  retry_cooldown_seconds: 60
+  keyframe_interval_seconds: 2
+  feedback_idr_min_interval_ms: 500
+  repeated_rejection_limit: 3
+  recording_enabled: false
+  prejoin_voice: true         # the ingest joins the main channel while the target is there, before it streams
+  relay_autoscale: true       # start relay_accounts only when the main channel needs them; false = all relays always publish
+  relay_idle_stop_seconds: 30    # an extra relay stops only after its Go Live had no viewer this long
+  stream_viewer_cap: 50       # viewers one Go Live can hold
+  self_deaf_ingest: true      # the ingest joins voice self-muted and self-deafened; set false if a deafened ingest stops receiving the target's stream audio
+  self_deaf_outputs: true     # relay/mirror accounts join self-muted and self-deafened (they only publish)
+
+liveness:
+  source_dead_timeout_seconds: null   # must be the value measured in M0 before enabling
+  verified_capability_manifest: "manifests/verified-capabilities.json"
+
+storage:
+  state_directory: "/var/lib/discord-relay"
+
+logging:
+  level: INFO
+  include_media: false
+  network_stats: false   # opt-in: expose packet loss / NACK / RTX counters in status
+
+control:
+  chat_commands: true         # accept relay commands from chat messages; false = no message is read
+  command_prefix: "!relay"    # commands look like "!relay status"; no whitespace
+  operator_user_ids: []       # decimal user ID strings allowed to use every command
+  operator_role_ids: []       # decimal role ID strings; members holding any of these roles may use every command too
+  command_channel_id: null    # optional decimal channel ID; when set, commands are accepted only there
+  public_commands: ["status", "mirror", "unmirror"]   # anyone in the guild may use these; names: status, mirror, unmirror, on, off, target, channel, prejoin, autoscale
+  command_cooldown_seconds: 5 # per author: further commands are ignored this long (one notice); operators are exempt
+  change_cooldown_seconds: 3  # global: no new change (every command but status) this long after the last one, for everyone

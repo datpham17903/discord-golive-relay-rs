@@ -1,0 +1,1093 @@
+{
+  "schema_version": 1,
+  "kind": "capability-manifest",
+  "scope": "static source audit only (G0); every row still needs the live M0 test in live_test",
+  "audited_on": "2026-11-01",
+  "revision": {
+    "discord.py-self": "git 2ba64a9a997e151a9c259984e0a179b1fdf4aff4 (2.2.0a5340)",
+    "discord-native-voice": "0.1.1 (tag v0.1.1, 18bbd204bfe46a781bee37cc8c10d574bdf435dd)"
+  },
+  "live": {
+    "source_dead_timeout_seconds": null,
+    "paused_field_updates": "unknown",
+    "decoder_continuity_resume_verified": false
+  },
+  "items": [
+    {
+      "topic": "discovery",
+      "item": "Q1a. Public stream events a subclass can hook: on_stream_create(stream), on_stream_available(stream), on_stream_unavailable(stream), on_stream_update(before, after), on_stream_delete(stream, reason); also client.wait_for('stream_create'|'stream_update'|'stream_delete', check=..., timeout=...)",
+      "status": "supported",
+      "api": "class MyClient(discord.Client): async def on_stream_create(self, stream); async def on_stream_update(self, before, after); async def on_stream_delete(self, stream, reason); await client.wait_for('stream_create', check=..., timeout=...)",
+      "evidence": [
+        "discord/state.py:3699-3718 parse_stream_create stores via _store_stream and dispatches 'stream_create' (or 'stream_available' if old.unavailable is True).",
+        "discord/state.py:3730-3746 parse_stream_update dispatches 'stream_update' with (old, stream); unknown stream keys are discarded (3732-3734).",
+        "discord/state.py:3748-3780 parse_stream_delete dispatches 'stream_unavailable' or 'stream_delete' with (stream, reason).",
+        "discord/client.py:901-903 dispatch() builds method 'on_' + event and getattr's it; client.py:890-899 _schedule_event runs it as a task.",
+        "discord/client.py:2273-2303 wait_for overloads for stream_create/available/unavailable (Stream), stream_update (Stream, Stream), stream_delete (Stream, StreamDeleteReason).",
+        "discord/state.py:1837 READY path not involved; parsers are registered by name from parse_* methods at state.py:1148-1150."
+      ],
+      "notes": "Stream parse functions do not check for a voice connection. The only voice-gated piece is StreamProtocol dispatch (state.py:3693-3697 via _get_stream_client), which is irrelevant to a probe. Client itself defines no on_stream_* defaults (grep of client.py), so subclass overrides are the hook. Handlers run as scheduled tasks, not inline with the gateway parse. | LIVE G1: stream_* not delivered outside voice.",
+      "live_test": "Whether Discord sends STREAM_CREATE/UPDATE/DELETE for a guild voice channel the account has not joined. The source only shows the library forwards them unconditionally.",
+      "verified_live": true
+    },
+    {
+      "topic": "discovery",
+      "item": "Q1b. Learning Go Live start/stop through the voice-state flag self_stream (VOICE_STATE_UPDATE) without joining",
+      "status": "supported",
+      "api": "async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState); after.self_stream: bool",
+      "evidence": [
+        "discord/member.py:87 class VoiceState; member.py:155 self.self_stream = data.get('self_stream', False).",
+        "discord/state.py:3650-3681 parse_voice_state_update calls guild._update_voice_state and dispatches 'voice_state_update'(member, before, after) only when a member object is resolved (else it logs and drops).",
+        "discord/guild.py:621-655 _update_voice_state always stores the VoiceState in guild._voice_states (line ~640) before resolving the member; member can be None.",
+        "discord/client.py:2884 wait_for overload for 'voice_state_update'."
+      ],
+      "notes": "self_stream is a flag mirror of Go Live, not a stream key. Unknown from source whether it is authoritative relative to STREAM_* events. voice_state_update does not fire for a voice state whose member cannot be resolved from cache or payload. | LIVE G1: self_stream delivered outside voice; stale true when channel becomes null.",
+      "live_test": "Whether VOICE_STATE_UPDATE for other users carries self_stream when the account is not in that channel, and whether member is resolvable (member cache default is all(), state.py:1121-1123).",
+      "verified_live": true
+    },
+    {
+      "topic": "discovery",
+      "item": "Q1c. Client.get_stream(owner), Guild.streams, VoiceChannel.streams",
+      "status": "unsupported",
+      "api": "Named APIs do not exist. The only public lookup is voice_client.get_stream(owner) and voice_client.streams (voice_client.py:167-172, 182-204), which work only while the VoiceProtocol is connected to that channel. Non-joined lookup exists only internally as state.get_stream (state.py:1345-1346), which is needs-patch.",
+      "evidence": [
+        "Grep of discord/*.py: no Client.get_stream, no Guild.streams, no VoiceChannel.streams. Only definitions are voice_client.py:167 VoiceProtocol.streams and voice_client.py:182 VoiceProtocol.get_stream(owner).",
+        "discord/voice_client.py:182-200 VoiceProtocol.get_stream builds a StreamKey from self.channel and calls state.get_stream(key), so it needs a VoiceProtocol connected to that channel.",
+        "discord/state.py:1345-1346 ConnectionState.get_stream(stream_key) returns self._streams.get(key); this is internal, reached only via client._connection.",
+        "discord/stream.py:88-106 StreamKey.from_guild(guild_id, channel_id, owner_id) is public."
+      ],
+      "notes": "A non-joined lookup exists only in private state. Use the own event-maintained dict instead, keyed by StreamKey. | verifier: The item lumps three names together. Grep of discord/**/*.py finds no Client.get_stream, no Guild.streams and no VoiceChannel.streams. The only def get_stream/def streams are voice_client.py:167 and :182 and state.py:1345. So the three named APIs are verified absent (unsupported). The non-joined path via ConnectionState.get_stream is internal only (needs-patch). voice_client.py:198-204 builds a StreamKey from self.channel and calls state.get_stream.",
+      "live_test": "None needed for the API shape; the cache contents depend on the event timing questions above.",
+      "verified_live": false
+    },
+    {
+      "topic": "discovery",
+      "item": "Q2a. Stream fields: key, rtc_server_id, rtc_channel_id, region, viewer_ids, paused, unavailable; owner_id, guild_id, channel_id, owner properties",
+      "status": "supported",
+      "api": "stream.key, stream.owner_id, stream.guild_id, stream.channel_id, stream.rtc_server_id, stream.rtc_channel_id, stream.region, stream.viewer_ids (list[int]), stream.paused, stream.unavailable",
+      "evidence": [
+        "discord/stream.py:199-259 Stream class, __slots__ and _update.",
+        "discord/stream.py:266-279 guild_id, channel_id, owner_id properties derived from key.",
+        "discord/stream.py:305-308 owner returns cached User or None.",
+        "discord/stream.py:310-312 is_owner() compares owner_id with self_id."
+      ],
+      "notes": "Stream has no public Stream.guild_id guard. For a target filter use owner_id and guild_id.",
+      "live_test": "None.",
+      "verified_live": false
+    },
+    {
+      "topic": "discovery",
+      "item": "Q2b. How paused is updated (gateway event)",
+      "status": "supported",
+      "api": "on_stream_update(before, after) -> after.paused; await stream.set_paused(bool) (owner only)",
+      "evidence": [
+        "discord/state.py:3730-3746 parse_stream_update: stream._update(data) then dispatch 'stream_update'(old, stream).",
+        "discord/stream.py:258-259 _update sets paused only if 'paused' in data.",
+        "discord/types/gateway.py:449-454 StreamEvent has optional paused; StreamUpdateEvent = StreamEvent (types/gateway.py:474).",
+        "discord/stream.py:407-419 set_paused is owner-only and sends stream_set_paused (gateway op 22)."
+      ],
+      "notes": "The library reads paused from STREAM_UPDATE and optionally STREAM_CREATE. Only the stream owner can set it.",
+      "live_test": "Whether pausing emits STREAM_UPDATE to a non-owner account.",
+      "verified_live": false
+    },
+    {
+      "topic": "discovery",
+      "item": "Q2c. viewer_ids and unavailable state",
+      "status": "supported",
+      "api": "stream.viewer_ids (list[int]); stream.unavailable; stream.viewers (cached users only)",
+      "evidence": [
+        "discord/stream.py:256-257 viewer_ids updated from payload when present.",
+        "discord/stream.py:314-323 viewers resolves only cached users.",
+        "discord/state.py:3750-3766 STREAM_DELETE with unavailable=True marks stream.unavailable and keeps it cached; a later STREAM_CREATE on an unavailable entry dispatches stream_available (3700-3709)."
+      ],
+      "notes": "Viewer changes arrive through create/update events. Unavailable streams stay in the cache.",
+      "live_test": "Whether viewer_ids is populated for non-joined observers.",
+      "verified_live": false
+    },
+    {
+      "topic": "discovery",
+      "item": "Q3. Stream incarnation / key reuse after stop-start",
+      "status": "unsupported",
+      "api": "No public incarnation id. Use object identity plus event order, with the caveat below.",
+      "evidence": [
+        "discord/stream.py:73 and 83-86 StreamKey slots are only type, guild_id, channel_id, owner_id.",
+        "discord/types/gateway.py:449-471 StreamEvent, StreamCreateEvent, StreamDeleteEvent have no incarnation or nonce field.",
+        "discord/state.py:3769 STREAM_DELETE pops the key, so the next create builds a new Stream object (1348-1354). Distinguish incarnations by object identity plus event order.",
+        "discord/state.py:1356-1357 and 3700-3718: a STREAM_CREATE on an existing non-unavailable entry reuses the object and re-dispatches stream_create."
+      ],
+      "notes": "Because the key includes channel_id (stream.py:89-106), a channel move changes the key. Whether Discord reuses the same key on restart is unknown from source. rtc_server_id/rtc_channel_id from create (types/gateway.py:456-458) are a possible but unverified discriminator.",
+      "live_test": "Stop and start Go Live in the same channel and compare the key, the rtc ids and the object identity.",
+      "verified_live": false
+    },
+    {
+      "topic": "discovery",
+      "item": "Q4a. RESUME: is there on_resumed; do replayed dispatches run before it",
+      "status": "supported",
+      "api": "async def on_resumed(self) -> None",
+      "evidence": [
+        "discord/gateway.py:655-657 RESUMED is logged, then the parser table still runs (gateway.py:660-666).",
+        "discord/state.py:1982-1983 parse_resumed dispatches 'resumed', so the hook is on_resumed (client.py:901-903).",
+        "discord/client.py:1962 Literal['connect','disconnect','ready','resumed'] overload.",
+        "discord/gateway.py:724 poll_event awaits received_message sequentially, so parses run in arrival order.",
+        "Grep of client.py: no default on_resumed body; it is a subclass override point."
+      ],
+      "notes": "Library-side: parse_* are synchronous (gateway.py:660-666); handlers are scheduled as tasks (client.py:890-899). Therefore on_resumed can run before handler tasks for earlier replayed events finish, but state mutations are already applied in order.",
+      "live_test": "Whether Discord sends replayed DISPATCHes before the RESUMED op. Not settled by this source.",
+      "verified_live": false
+    },
+    {
+      "topic": "discovery",
+      "item": "Q4b. INVALID_SESSION and new READY: is the stream cache rebuilt?",
+      "status": "supported",
+      "api": "on_disconnect, on_ready; no stream snapshot API",
+      "evidence": [
+        "discord/gateway.py:622-636 INVALIDATE_SESSION: data False clears sequence and session_id and raises ReconnectWebSocket(resume=False); data True closes and raises ReconnectWebSocket.",
+        "discord/client.py:1193-1199 ReconnectWebSocket updates resume and session params and dispatches 'disconnect'.",
+        "discord/state.py:1834-1837 parse_ready calls self.clear().",
+        "discord/state.py:1154 and 1185-1186 clear() resets _voice_states and _streams unconditionally.",
+        "discord/state.py:1834-1900 parse_ready and READY_SUPPLEMENTAL do not read any stream data."
+      ],
+      "notes": "After a fresh READY the stream cache is empty and is rebuilt only from later STREAM_* events. On the RESUME path (client.py:1218-1229) the cache is kept and the library has no resync code, so missed events during a disconnect may leave stale entries (inference).",
+      "live_test": "Whether Discord sends STREAM_CREATE for already-live streams after a fresh IDENTIFY.",
+      "verified_live": false
+    },
+    {
+      "topic": "discovery",
+      "item": "Q5a. Enumerate current voice-channel participants without joining (VoiceChannel.voice_states / members)",
+      "status": "supported",
+      "api": "channel.voice_states: dict[int, discord.VoiceState]; channel.members: list[discord.Member] (cached only)",
+      "evidence": [
+        "discord/channel.py:1089-1110 VoiceChannel.voice_states returns Dict[int, VoiceState] from guild._voice_states filtered by channel id; no member cache needed.",
+        "discord/channel.py:1078-1086 VoiceChannel.members resolves each user id via guild.get_member, so cached members only.",
+        "discord/guild.py:753 voice_states seeded from GUILD_CREATE payload; state.py:1923-1924 READY_SUPPLEMENTAL merges extra voice_states.",
+        "discord/state.py:1993 and 2016-2021 PASSIVE_UPDATE_V2 removes and updates voice states for large guilds not subscribed.",
+        "discord/state.py:1121-1123 default member_cache_flags = MemberCacheFlags.all()."
+      ],
+      "notes": "voice_states is the snapshot to use. Guild._voice_states itself is private. VoiceState has self_stream/self_video/channel (member.py:87-160).",
+      "live_test": "Whether a non-joined account receives voice_states for a large guild it is not subscribed to (PASSIVE_UPDATE_V2 covers it in code).",
+      "verified_live": false
+    },
+    {
+      "topic": "discovery",
+      "item": "Q5b. Member chunking and guild subscription requirements",
+      "status": "supported",
+      "api": "discord.Client(guild_subscriptions=..., chunk_guilds_at_startup=..., member_cache_flags=...)",
+      "evidence": [
+        "discord/state.py:1119 guild_subscriptions default True; state.py:1133 chunk_guilds_at_startup defaults to subscribe_guilds and cache_flags.joined.",
+        "discord/state.py:1627-1628 _guild_needs_chunking; state.py:3243-3244 subscribe_guild on GUILD_CREATE when subscribing.",
+        "discord/state.py:1793-1799 READY path subscribes and chunks guilds when enabled."
+      ],
+      "notes": "voice_states do not depend on chunking; only VoiceChannel.members does. Chunk timeouts are at state.py:3071-3072.",
+      "live_test": "None needed for voice_states; confirm members via get_member only if needed.",
+      "verified_live": false
+    },
+    {
+      "topic": "discovery",
+      "item": "G1 probe: log self_stream and stream changes for a target without joining voice",
+      "status": "supported",
+      "api": "subclass discord.Client; override on_stream_create/update/delete/available/unavailable and on_voice_state_update; client.run(TOKEN) without connect()",
+      "evidence": [
+        "discord/client.py:1318-1326 Client.run(token, *, reconnect=True, ...).",
+        "discord/client.py:901-903 dispatch method name 'on_' + event.",
+        "discord/member.py:323 and 391 Member.guild attribute."
+      ],
+      "notes": "Never call connect(); no voice join required. Keep the token out of source. The sketch is in integration_sketch.",
+      "live_test": "Confirm the four live questions above: non-joined STREAM_* delivery, key reuse on restart, pause events, and replay order vs RESUMED.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q1a Watch entry points: Stream.watch(...) and VoiceProtocol.watch_stream(...) signatures",
+      "status": "supported",
+      "api": "stream = vc.get_stream(member)  # voice_client.py:182 (owner: Snowflake)\nsc = await stream.watch(timeout=30.0, reconnect=True, cls=MyStreamClient)\n# uncached: sc = await vc.watch_stream(stream_key, timeout=30.0, reconnect=True, cls=MyStreamClient)",
+      "evidence": [
+        "discord/stream.py:325-332 `async def watch(self, *, timeout: float = 30.0, reconnect: bool = True, cls: Callable[[VoiceProtocol, Stream], ST]) -> ST` (raises ClientException if self owns the stream or the voice client is not the stream's channel client)",
+        "discord/voice_client.py:207-214 `async def watch_stream(self, stream_key: StreamKey, *, timeout: float = 30.0, reconnect: bool = True, cls)`; class VoiceProtocol is at voice_client.py:92; body at 207-266 uses cached stream via stream.watch, else state._connect_stream",
+        "discord/state.py:1417-1431 `protocol = cls(voice_client, stream)`; checks isinstance StreamProtocol; `await protocol.connect(timeout=timeout, reconnect=reconnect)`"
+      ],
+      "notes": "cls is called as cls(voice_client, stream) and must be a StreamProtocol. vc must be an ext.native_voice VoiceClient (see Q1d). Watching your own stream raises.",
+      "live_test": "From a second account in the same voice channel, watch a live Go Live with the default timeout and confirm the returned protocol connects (no timeout in state._connect_stream).",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q1b reconnect parameter semantics",
+      "status": "supported",
+      "api": "reconnect: bool kwarg on Stream.watch / watch_stream / StreamClient.connect(reconnect=...)",
+      "evidence": [
+        "discord/ext/native_voice/stream_client.py:418 `self._stream_reconnect = reconnect`",
+        "discord/ext/native_voice/stream_client.py:619-629 on_stream_unavailable: if not reconnect -> _disconnect_from_gateway(); else stop(), _reset_receive_transport_state(), `_reconnect_on_available = True`, connection.stream_unavailable()",
+        "discord/ext/native_voice/stream_client.py:601-607 on_stream_available reconnects via self.connect(...) when _reconnect_on_available and not connected"
+      ],
+      "notes": "Source comment at stream_client.py:~624 says receive sinks stay registered across reconnect; packet state is reset. The after= callback of listen is only invoked from _stop_listening (client.py:2657-2690 region), so a reconnect path does not by source call it (inference from code shape).",
+      "live_test": "Stop and restart the target's Go Live; check whether the listen callback resumes without re-calling listen() and whether after(...) fires.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q1c WatchStreamClient class",
+      "status": "unsupported",
+      "api": "class Relay(StreamClient): pass   # use as cls=Relay",
+      "evidence": [
+        "Grep for 'WatchStreamClient' over the whole discord package, discord/ext, and the nv-src tree returned no matches (exit 1).",
+        "The subclassable hook that exists: discord/ext/native_voice/stream_client.py:116 `class StreamClient(VoiceClient, StreamProtocol)`; exported from discord/ext/native_voice/__init__.py (`from .stream_client import StreamClient`).",
+        "Base protocol: discord/stream.py:453 class StreamProtocol with abstract connect/disconnect/on_stream_delete."
+      ],
+      "notes": "Any name like WatchStreamClient in the plan must be replaced by a user subclass of StreamClient (or StreamProtocol for a non-native transport).",
+      "live_test": "None needed; absence verified by grep of the pinned installed package and source tree.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q1d StreamClient.with_config options and parent requirement",
+      "status": "supported",
+      "api": "Relay = StreamClient.with_config(rtx=True, udp_qos=False, codecs=[...], video_streams=[...], enable_debug_stats=True)\nawait stream.watch(cls=Relay)",
+      "evidence": [
+        "discord/ext/native_voice/stream_client.py:141-150 `@classmethod with_config(cls, *, rtx=MISSING, udp_qos=MISSING, codecs=MISSING, video_streams=MISSING, ffmpeg_executable=MISSING, enable_debug_stats=MISSING) -> type[SC]`",
+        "stream_client.py:184-188 docstring: codecs must include an Opus audio codec, otherwise ValueError; codec/RTX options inherit from parent when omitted",
+        "discord/ext/native_voice/stream_client.py:268-269 `if not isinstance(parent_voice_client, VoiceClient): raise TypeError('StreamClient requires a native VoiceClient parent')`"
+      ],
+      "notes": "with_config returns a subclass that must be the cls passed to watch. The parent vc must be an ext.native_voice.VoiceClient, not stock discord.VoiceClient.",
+      "live_test": "Confirm the negotiated codecs in the voice server handshake when codecs= is passed (not settled by source).",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q2a VoiceClient.listen(...) signature and callback behaviour",
+      "status": "supported",
+      "api": "sc.listen(callback_or_MediaSink, after=lambda err: ...)",
+      "evidence": [
+        "discord/ext/native_voice/client.py:2497-2501 `def listen(self, sink: MediaSink | Callable[[MediaPacket], Any], *, after: Callable[[Exception | None], Any] | None = None) -> None`",
+        "client.py:2514-2530 raises ClientException if not connected or already listening; registers `add_rtp_listener(self._socket_listener, batch=True)`, `_ensure_rtcp_feedback_listener()`, `_start_video_nack_retry_thread()`",
+        "client.py:2693-2700 _dispatch_media_callback_packet: any exception calls _stop_listening(exc)",
+        "client.py:2708-2725 _handle_media_callback_result: awaitable results are scheduled on self.loop; iterables are iterated"
+      ],
+      "notes": "Callback runs synchronously on the native UDP dispatcher thread (D:/.../nv-src/src/python/net.rs:282 spawns run_udp_dispatcher). A blocking callback stalls media; an exception stops listening.",
+      "live_test": "Measure callback rate and latency under load to confirm the dispatcher thread is not blocked by your handler.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q2b Sinks that deliver ENCODED video access units (EncodedVideoSink and others)",
+      "status": "supported",
+      "api": "Option A: sc.listen(lambda pkt: ...)  Option B: subclass MediaSink and implement write(packet) (+ optional wants_media). EncodedVideoSink is file/BinaryIO oriented.",
+      "evidence": [
+        "discord/ext/native_voice/media.py:5305-5335 `class EncodedVideoSink(_BinaryWriterSink)`; docstring: writes received encoded frames to IVF or Annex B output; destination is a path or BinaryIO",
+        "media.py:4397-4427 _BinaryWriterSink writes to a file/BinaryIO",
+        "media.py:5420-5435 EncodedVideoSink.write writes len+timestamp (IVF) then payload only; no per-frame metadata",
+        "media.py:5402-5418 _should_write_h26x drops H264 frames until SPS+PPS+IDR seen",
+        "media.py:3572-3600 MediaSink ABC: abstract write(packet: MediaPacket); wants_media(media_type, codec) filter (media.py:3851-3880 _FilteredMediaSink)"
+      ],
+      "notes": "For in-process access units with timestamps, use a callable or a MediaSink subclass; EncodedVideoSink only writes bytes to a file or BinaryIO and drops all metadata.",
+      "live_test": "None needed for API shape; confirm frame sizes and keyframe cadence on a real stream.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q2c Per-frame video metadata: bytes, codec, ssrc, RTP timestamp, received_at, rtcp_time",
+      "status": "supported",
+      "api": "def on_packet(pkt: MediaPacket): pkt.payload, pkt.codec, pkt.ssrc, pkt.timestamp, pkt.received_at, pkt.rtcp_time, pkt.user_id",
+      "evidence": [
+        "discord/ext/native_voice/media.py:160-233 MediaPacket fields: payload ('full encoded video frame' for video), codec, ssrc, user_id (may be None), timestamp (RTP), sequence, received_at ('Local monotonic timestamp'), rtcp_time ('Unix timestamp mapped from RTCP sender reports or RTP absolute send time'), raw, rtp_packets",
+        "discord/ext/native_voice/client.py:3009-3035 _make_video_media_packet builds MediaPacket(media_type='video', codec, payload, ssrc, user_id, timestamp, received_at, rtcp_time=_rtcp_time_for_packet(...))",
+        "discord/ext/native_voice/client.py:2936-2990 _decode_video_packets: depacketize then _decrypt_video_frame (DAVE) before emitting"
+      ],
+      "notes": "H264 payload is an Annex B access unit (D:/.../nv-src/src/video/h264.rs:19 and :56 extend ANNEX_B_START_CODE; _native_voice.pyi H264Depacketizer.push_packet returns bytes). received_at is perf_counter (monotonic, not wall clock). sequence is the RTP sequence of the packet that completed the frame. rtcp_time may be None.",
+      "live_test": "Log rtcp_time vs received_at over a few seconds to confirm SR mapping produces wall-clock values; confirm H264 payloads begin with 00 00 00 01 start codes.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q2d Keyframe flag on delivered frames",
+      "status": "unsupported",
+      "api": "none public; app-side: scan Annex B NAL headers (nal_type = byte & 0x1F; 5=IDR, 7=SPS, 8=PPS)",
+      "evidence": [
+        "MediaPacket (media.py:160-233) has no keyframe attribute; the video MediaPacket is built with marker=True hard-coded (D:/.../ext/native_voice/client.py:3029), so marker is not a keyframe signal.",
+        "Only private keyframe detection exists: D:/.../ext/native_voice/client.py:1960-1998 `_is_config_keyframe` (static, private); constants media.py:369-376 `_H26X_PARAMETER_SET_TYPES` H264 {7,8} and `_H26X_KEYFRAME_TYPES` H264 {5}."
+      ],
+      "notes": "Verified absent as a field. The app must derive keyframe status itself from pkt.payload.",
+      "live_test": "Confirm IDR NALs (type 5) arrive at the expected GOP cadence and that SPS/PPS are in-band before the first IDR.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q2e Audio delivery format (Opus packets or PCM)",
+      "status": "supported",
+      "api": "pkt.media_type == 'audio' -> pkt.payload is one Opus packet (after optional DAVE decrypt); pkt.speaking_flags, pkt.audio_level; optional PCMDecodeSink(child) for PCM",
+      "evidence": [
+        "D:/.../ext/native_voice/client.py:2790-2842 audio path: payload = decoded.payload after optional DAVE decrypt (client.py:2797-2815); MediaPacket(codec, payload, timestamp, received_at, rtcp_time, speaking_flags, audio_level, audio_voice_activity)",
+        "client.py:1775 `return 90_000 if ssrc in self._connection.video_ssrcs else opus.Encoder.SAMPLING_RATE` (audio RTP clock is Opus 48 kHz)",
+        "media.py:4196-4215 PCMDecodeSink(destination, fec=False): decodes Opus to PCM before forwarding (via _OpusDecoderCache)"
+      ],
+      "notes": "Audio is not PCM at the listen layer. Silence frames are detected by client.py _is_unencrypted_opus_silence_payload.",
+      "live_test": "Confirm opus payload decodes with a stock Opus decoder and RTP timestamps advance by 960 per 20 ms frame.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q3a Source of rtcp_time (SR or abs-send-time)",
+      "status": "supported",
+      "api": "pkt.rtcp_time (float Unix seconds or None)",
+      "evidence": [
+        "D:/.../ext/native_voice/client.py:1686-1699 _handle_rtcp_sender_report stores (ntp_time, rtp_timestamp, clock_rate) per sender SSRC from the RTCP SR NTP fields",
+        "client.py:1874-1887 _rtcp_time_for_packet: ntp_time + (rtp_delta / clock_rate); falls back to _absolute_send_time_from_extensions when no SR for the SSRC or delta is unusable",
+        "client.py:1825-1839 _absolute_send_time_from_extensions decodes the abs-send-time RTP extension (6.18 fixed point, wrapped to current 64 s window)"
+      ],
+      "notes": "SR is preferred; abs-send-time is the fallback. Mapping is done per packet at decode time.",
+      "live_test": "Confirm rtcp_time is non-None for both audio and video once an SR has arrived.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q3b Whether SR receive time is observable",
+      "status": "needs-patch",
+      "api": "none public; subclass would need self._rtcp_sender_report_lsr (private)",
+      "evidence": [
+        "D:/.../ext/native_voice/client.py:1697-1700 stores `_rtcp_sender_report_lsr[sender_ssrc] = (lsr, time.perf_counter())` (receive time recorded internally)",
+        "No MediaPacket field exposes it (media.py:160-233). Grep found no public accessor. _rtcp_sender_reports is private (client.py:567)."
+      ],
+      "notes": "The SR receive time exists internally but is not reachable without touching private attributes or patching.",
+      "live_test": "Optional: read self._rtcp_sender_report_lsr from a subclass to confirm the stored perf_counter value.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q3c Raw RTP observable per SSRC",
+      "status": "supported",
+      "api": "pkt.raw, pkt.rtp_packets (tuple of RTPPacket), pkt.sequence, pkt.ssrc",
+      "evidence": [
+        "D:/.../ext/native_voice/media.py:160-233 MediaPacket.raw ('raw encrypted RTP packet received from the socket') and rtp_packets (tuple of RTPPacket)",
+        "D:/.../ext/native_voice/rtp.py:157-200 RTPPacket carries raw, ssrc, sequence, timestamp, rtx, rtx_ssrc, rtx_payload_type, payload_type, audio_level",
+        "D:/.../ext/native_voice/client.py:2945-2950 video frame: each RTP packet appended to frame_rtp_packets and attached to the emitted MediaPacket"
+      ],
+      "notes": "Per-packet raw data is only visible for packets that produce a MediaPacket. Buffered, dropped, or failed-decrypt packets are not surfaced. raw is ciphertext per the docstring.",
+      "live_test": "Compare count of raw RTP packets per frame with frame size to confirm packetization and that raw bytes are SRTP ciphertext.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q3d Raw RTCP observable",
+      "status": "needs-patch",
+      "api": "none public; subclass could call self._connection.add_rtcp_listener(cb) (private)",
+      "evidence": [
+        "D:/.../ext/native_voice/client.py:237-239 `_ConnectionState.add_rtcp_listener(callback)` (class _ConnectionState starts at client.py:180) registers a raw RTCP socket listener",
+        "client.py:1666-1684 _handle_rtcp_packet decrypts and dispatches SR, RR, NACK, PLI; no public hook for app code",
+        "client.py:2529-2530 _ensure_rtcp_feedback_listener is invoked from listen()"
+      ],
+      "notes": "Raw RTCP reaches app code only through private internals.",
+      "live_test": "Optional.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q4a request_video(ssrc, quality=..., any=..., pixel_count=...) signature and semantics",
+      "status": "supported",
+      "api": "await sc.request_video(video_ssrc, quality=100)",
+      "evidence": [
+        "D:/.../ext/native_voice/client.py:1557-1563 `async def request_video(self, ssrc: int, *, quality: int = 100, any: int | None = MISSING, pixel_count: int | None = None) -> None`; raises ClientException if not connected",
+        "client.py:1588-1595 stores _local_media_sink_wants[ssrc]=quality and calls _send_media_sink_wants()",
+        "client.py:1550-1555 _send_media_sink_wants -> self.ws.media_sink_wants(...)",
+        "D:/.../discord/gateway.py:1044 `MEDIA_SINK_WANTS = 15`; gateway.py:1200-1219 payload {str(ssrc): quality, 'any': ..., 'pixelCounts': {...}}",
+        "D:/.../ext/native_voice/media.py:325-340 MediaSinkWants docstring: positive value = requested quality, 0 = receiver does not want that SSRC forwarded",
+        "client.py:619 `_local_media_sink_wants_any = 100` default"
+      ],
+      "notes": "The only call site of _send_media_sink_wants is request_video (client.py:1595); no automatic request was found. The inbound op-15 handler (client.py:628-630, on_media_sink_wants at 1597-1607) updates wants that control what this client SENDS, not what it receives.",
+      "live_test": "Watch a Go Live with and without request_video and compare whether video packets arrive; vary quality to see the effect.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q4b Obtaining the target's video SSRC for request_video",
+      "status": "needs-patch",
+      "api": "none public; private: sc._connection.video_ssrcs / sc._connection.ssrc_user_ids",
+      "evidence": [
+        "D:/.../discord/voice_state.py:210-213 `ssrc`, `ssrc_user_ids`, `video_ssrcs` live on the private connection state",
+        "D:/.../discord/gateway.py:1331 `self._connection.ssrc_user_ids[ssrc] = user_id`",
+        "No public Stream attribute carries an SSRC (grep 'ssrc' in discord/stream.py and discord/state.py returned no matches)",
+        "MediaPacket.user_id maps SSRC to user once known (client.py:2762)"
+      ],
+      "notes": "Which gateway event delivers the target's video SSRC to the stream RTC connection is not settled by the source read here.",
+      "live_test": "Log every MediaPacket ssrc and user_id while the target streams to find the video SSRC and confirm the mapping.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q5a Upstream PLI (keyframe request) from the receiver",
+      "status": "supported",
+      "api": "sc.send_video_pli(target_video_ssrc)",
+      "evidence": [
+        "D:/.../ext/native_voice/client.py:1939-1948 `def send_video_pli(self, ssrc: int) -> None`: builds RTCP header 0x80|RTCP_PICTURE_LOSS_INDICATION, sender SSRC self._connection.ssrc, body media SSRC, sends via _send_udp_packet (no docstring)",
+        "client.py:1950-1958 _maybe_send_startup_video_pli: once per SSRC for H264/H265, called from client.py:2776 on the first video packet",
+        "client.py:2214-2218 _add_pending_video_nacks: PLI sent after NACK list overflow",
+        "StreamClient inherits VoiceClient (stream_client.py:116)"
+      ],
+      "notes": "Public name but undocumented. _send_udp_packet swallows OSError (client.py:803-810). Requires a connected session for encryption.",
+      "live_test": "Send PLI to the target video SSRC mid-GOP and measure time to next IDR arrival.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q5b FIR (full intra request) upstream",
+      "status": "unsupported",
+      "api": "none",
+      "evidence": [
+        "Python: the only RTCP payload-feedback constant imported for sending is RTCP_PICTURE_LOSS_INDICATION (client.py:69); grep for FIR / full_intra / intra_request over ext/native_voice returned no matches.",
+        "Rust: grep over nv-src/src for pli, fir, picture, intra, keyframe found no PLI/FIR send path; RTCP handling there is classify/decrypt/parse only (D:/.../nv-src/src/python/net.rs:407-412; D:/.../nv-src/src/python/transport.rs:295-369)."
+      ],
+      "notes": "PLI is the only upstream keyframe request found in either language.",
+      "live_test": "None; absence verified by grep.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Q6 self_deaf effect on Go Live audio reception",
+      "status": "unknown",
+      "api": "parent VoiceClient.connect(self_deaf=...) / guild.change_voice_state(self_deaf=...)",
+      "evidence": [
+        "Client-side receive is not gated: the receive path registers add_rtp_listener (D:/.../ext/native_voice/client.py:2527-2528) and decrypts/dispatches without reading self_deaf; self_deaf appears only as a parameter in client.py:637-662, stream_client.py:413-423, and stored/reused in voice_state.py:197-198, 452-453, 509-510, 538.",
+        "Stream RTC connect ignores self_deaf: D:/.../ext/native_voice/stream_client.py:65-70 StreamConnectionState._voice_connect overrides the base and sends no gateway op.",
+        "Main voice session sends it: D:/.../discord/voice_state.py:758-767 base _voice_connect -> change_voice_state(self_deaf=...); gateway.py:895-905 voice_state payload includes self_deaf."
+      ],
+      "notes": "Source shows the relay process does not stop receiving when self_deaf is True. Whether Discord's server stops forwarding Go Live media to a deafened account is server-side and not settled by source. Deafening the parent voice session changes its voice state, which is observable on the wire.",
+      "live_test": "Deafen the relay account's main voice session while watching and count MediaPacket per second before and after.",
+      "verified_live": false
+    },
+    {
+      "topic": "receive",
+      "item": "Native source vs installed build consistency",
+      "status": "supported",
+      "api": "n/a",
+      "evidence": [
+        "nv-src/Cargo.toml:3 `version = \"0.1.1\"`; installed discord/ext/native_voice/_version.py reads the version from Cargo.toml (matches v0.1.1)."
+      ],
+      "notes": "Version match verified. The compiled _native_voice.pyd was not byte-compared to the Rust source; Rust-side findings describe the source tag, not the binary.",
+      "live_test": "Optional: check native behaviour with a PLI or RTCP probe against the installed binary.",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Q1a create_stream overloads and signature (native VoiceClient)",
+      "status": "supported",
+      "api": "client = await channel.connect(cls=native_voice.VoiceClient)\nout = await client.create_stream(cls=OutClient, timeout=30.0, reconnect=True)",
+      "evidence": [
+        "NV client.py:672-687 two @overload stubs: create_stream(*, timeout, reconnect) -> StreamClient, and create_stream(*, timeout, reconnect, cls: Callable[[VoiceProtocol, Stream], ST]) -> ST",
+        "NV client.py:689-695 impl: create_stream(self, *, timeout: float = 30.0, reconnect: bool = True, cls = MISSING)",
+        "NV client.py:720-738: requires is_connected() and session_id; cls MISSING -> imports StreamClient and calls super().create_stream(cls=StreamClient); else passes cls through",
+        "DC voice_client.py:267-273 base create_stream(*, timeout, reconnect, cls) (cls is required there)"
+      ],
+      "notes": "Overloads are keyword-only. Omitting cls returns the default StreamClient. Passing a subclass (e.g. StreamClient.with_config(...)) is the way to configure the output client.",
+      "live_test": "Confirm create_stream returns a StreamClient whose stream.is_owner() is True, and that the Discord client emits stream_create for the new key.",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Q1b OutputStreamClient class",
+      "status": "unsupported",
+      "api": "n/a (use StreamClient / StreamClient.with_config(...))",
+      "evidence": [
+        "NV __init__.py:60 and :107 export only StreamClient from stream_client",
+        "grep for 'OutputStreamClient' across DC and NV returned no matches",
+        "Output side is a StreamClient whose stream.is_owner() is true (DC stream.py:310-312; NV stream_client.py:385-386 play() rejects non-owned streams)"
+      ],
+      "notes": "No separate output class exists in the pinned stack. The role is determined only by stream ownership.",
+      "live_test": "None needed for existence; a live create_stream run shows the object is a StreamClient.",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Q1c reconnect parameter",
+      "status": "supported",
+      "api": "await voice_client.create_stream(cls=OutClient, reconnect=True)",
+      "evidence": [
+        "NV client.py:693 create_stream(reconnect: bool = True) forwards to super().create_stream(reconnect=...)",
+        "DC state.py:1377 _connect_stream(..., reconnect: bool); state.py:1426 await protocol.connect(timeout=timeout, reconnect=reconnect)",
+        "NV stream_client.py:408-418 StreamClient.connect stores self._stream_reconnect = reconnect",
+        "NV stream_client.py:617-630 on_stream_unavailable: returns early when not _stream_reconnect; otherwise sets _reconnect_on_available and calls _connection.stream_unavailable()"
+      ],
+      "notes": "reconnect only governs stream-protocol reconnect after stream_unavailable; it does not change codec or RID selection.",
+      "live_test": "Force a stream_unavailable/available cycle (or network drop) and observe whether the output client reconnects with reconnect=True and not with False.",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Q1d output codec H264 only and single RID (simulcast config)",
+      "status": "supported",
+      "api": "OutClient = StreamClient.with_config(\n    codecs=[VoiceCodec.opus(payload_type=120),\n            VoiceCodec.video('H264', priority=1000, payload_type=105, rtx_payload_type=106)],\n    video_streams=[VoiceStream.screen(rid='100', quality=100, max_framerate=30)],\n)",
+      "evidence": [
+        "NV stream_client.py:141-245 StreamClient.with_config(codecs=..., video_streams=..., rtx=..., ...); codecs set voice_codec_specs and disables auto capability/priority (lines 223-228); inherit_parent_codecs becomes False (209-211)",
+        "NV client.py:476-483 _normalize_voice_codecs: each entry must be VoiceCodec and an Opus audio codec must be present (ValueError otherwise)",
+        "NV client.py:293-300 default specs include H264 video with payload_type=105, rtx_payload_type=106, encode=False, decode=False; client.py:362-367 get_voice_codecs drops codecs with neither encode nor decode",
+        "NV stream_client.py:127 StreamClient default video_simulcast_streams=(VoiceStream.screen(quality=100),); DC voice_media.py:415 rid defaults to str(quality) -> '100'",
+        "DC voice_media.py:200-209 VoiceCodec.video(name, *, priority, payload_type, rtx_payload_type, encode=True, decode=True); DC voice_media.py:482-490 VoiceStream.screen(*, rid=None, quality=100, max_bitrate=None, max_framerate=None, max_resolution=None)"
+      ],
+      "notes": "Codec and stream config must be on the class passed to create_stream (NV client.py:395 and stream_client.py:155-157 docstrings). The default StreamClient already uses a single screen stream; H264 is only advertised if it is in codecs (default advertises AV1/H265/H264/VP8/VP9). payload_type 105/106 are the library defaults, not values confirmed against Discord; the server may reassign them. | verifier: Mechanics confirmed: stream_client.py:141-245 with_config; codecs path sets voice_codec_specs and disables auto capability/priority (stream_client.py:223-229); _normalize_voice_codecs client.py:476-483 requires Opus; StreamClient default screen simulcast stream stream_client.py:127; VoiceStream.screen rid defaults to str(quality) voice_media.py:415; VoiceCodec.video encode/decode default True voice_media.py:200-209. Incorrect note: the default does NOT literally advertise AV1/H265/H264/VP8/VP9. Default specs (client.py:293-299) have encode=False/decode=False, and get_voice_codecs (client.py:335-370) drops codecs unless the local FFmpeg capability probe sets encode/decode. Also a default StreamClient inherits the parent's codecs (stream_client.py:128, 136, 251), so H264 advertisement is determined by the parent's probe unless with_config(codecs=...) is used.",
+      "live_test": "Confirm the SESSION_DESCRIPTION negotiated video_codec is H264 and that the server accepts payload types 105/106 (or whatever it assigns).",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Q2a play() and MediaSource interface: pull-based?",
+      "status": "supported",
+      "api": "out.play(my_media_source)  # MediaSource subclass",
+      "evidence": [
+        "NV client.py:1176-1191 play(source, *, after, application, bitrate, ..., video_width, video_height, video_fps, video_bitrate)",
+        "NV client.py:1267-1295: wraps non-MediaSource in AudioMediaSource; when has_video and no _video_codec, starts start_video via run_coroutine_threadsafe; creates MediaPlayer(source, media_source, ...) and starts it",
+        "NV player.py:265-389 MediaPlayer._do_run is a thread loop that calls source.read() (line 316) and source.read_video_streams(streams) (line 359) each tick",
+        "NV stream_client.py:309-315 and 385-386: StreamClient.play requires stream.is_owner()"
+      ],
+      "notes": "The library pulls from the source on its own player thread; the app does not push frames. play() is synchronous and returns None.",
+      "live_test": "Run a source for 30 s and confirm read_video_streams is called about fps times per second on the player thread.",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Q2b methods a custom MediaSource must implement",
+      "status": "supported",
+      "api": "class MySource(native_voice.media.MediaSource):  # no abstract methods; override only what is used\n    def has_audio(self) -> bool  # False => read() never called\n    def read(self) -> bytes  # needed only if has_audio() True and not is_opus()\n    def has_video(self) -> bool\n    def read_video_streams(self, streams) -> Mapping[str, VideoFrame] | None\n    @property video_config -> VideoConfig | None",
+      "evidence": [
+        "NV media.py:419-516 MediaSource(AudioSource): has_audio() default True (436); read_video() default None (440); read_video_streams(streams) default delegates to read_video (450-476); has_video() default False (488); supports_simulcast() default False (492); video_config property default None (497); on_media_sink_wants no-op (501); is_finished() default False (514)",
+        "DC player.py:86-104 AudioSource.read raises NotImplementedError; player.py:110 cleanup()",
+        "NV player.py:287-292 read() only called when has_audio() is True; video_realtime, video_retry_delay, video_catchup_frames are class attributes (media.py:432-434)"
+      ],
+      "notes": "For video-only use, has_audio() False means read() is never called (player.py:287-289, 316). A no-op read() is still advisable because AudioSource.read raises NotImplementedError. | verifier: Method list and defaults confirmed (media.py:419-516; defaults at 436, 440, 450, 488, 492, 497, 501, 514). Incorrect wording: nothing is enforced. MediaSource is not abc-based (abc.ABC appears only at media.py:3572 for MediaSink; no abstractmethod on MediaSource), and DC AudioSource.read raises NotImplementedError only if called (DC player.py:86-104). read() is reached only when has_audio() is True (NV player.py:287-293, 316). Also is_opus() is a DC AudioSource method (player.py ~106).",
+      "live_test": "Instantiate the subclass with has_audio=False and confirm no NotImplementedError is raised during playback.",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Q2c feeding encoded H264 access units (EncodedVideoSource / VideoFrame)",
+      "status": "supported",
+      "api": "from discord.ext.native_voice.media import MediaSource, VideoFrame, VideoConfig\n# read_video_streams returns {stream.rid: VideoFrame(annexb_access_unit_bytes, frame_time_ms=1000/30)}",
+      "evidence": [
+        "NV media.py:245-257 VideoFrame(data: bytes, frame_time_ms: float = 33.0)",
+        "NV media.py:1412-1497 EncodedVideoSource(source, *, codec, fps, width, height, bitrate): path or binary stream; H264 read as Annex B with AUD delimiters (docstring 1415-1416)",
+        "NV media.py:1357-1368 _scan_for_auds: H264 AUD is NAL type 9; 1370-1394 frames are split at AUD positions; first AUD must be at offset 0 (1379-1384)",
+        "NV media.py:1373-1376 with no AUD and buffer over 2 MiB, buffer is trimmed (data loss)",
+        "NV media.py:1024-1100 VideoFrameSource(frames iterable) accepts VideoFrame or bytes"
+      ],
+      "notes": "Frames must be Annex B with an AUD NAL in each access unit, or the splitter never emits a frame. Whether PyAV packets meet this (start codes, AUD present, SPS/PPS) is not settled by source. | verifier: VideoFrame, MediaSource hooks and VideoFrameSource (media.py:1024-1100) confirmed. The AUD requirement applies only to EncodedVideoSource, which reads a path or binary stream (media.py:1412-1420) through _scan_for_auds/_extract_frame (media.py:1357-1398). A VideoFrame returned directly from read_video_streams bypasses that splitter and goes to Rust H264Packetizer.packetize (video/h264.rs:126-161), which splits Annex B without requiring AUDs. Also a timing detail: the splitter emits frame N only after frame N+1's AUD arrives (media.py:1393 frame_end = aud_positions[1]), so EncodedVideoSource adds one-access-unit latency.",
+      "live_test": "Encode with PyAV (libx264, AUD and repeat-headers enabled) and check each packet starts with an AUD and contains SPS/PPS/IDR on keyframes; confirm viewer decodes.",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Q2d frame_time / duration: current or next frame?",
+      "status": "supported",
+      "api": "VideoFrame(data, frame_time_ms=...)  # or VideoConfig(fps=...) with video_realtime=True",
+      "evidence": [
+        "NV media.py:245-257 VideoFrame.frame_time_ms default 33.0",
+        "NV player.py:231-238 _video_pacing_time: if video_realtime uses 1/video_config.fps, else max frame.frame_time_ms over frames sent this tick; player.py:372-373 next_video advanced by that value after send",
+        "NV player.py:199-210 _next_video_time (realtime vs catch-up logic)",
+        "RS video/common.rs:133-143 increment_timestamp(frame_time_ms) advances RTP timestamp by that duration (90 kHz)",
+        "RS video/h264.rs:126-163 packetize builds packets with current timestamp, then calls increment_timestamp(frame_time_ms) at line 161"
+      ],
+      "notes": "Duration is carried by the frame just sent. Its packets use the pre-increment timestamp; the next frame's RTP timestamp and pacing delay both advance by this duration. Within this pinned stack it is the 'current frame's duration applied to the next frame's start', not a per-frame PTS.",
+      "live_test": "Check RTP timestamps in a capture advance by 3000 (90 kHz / 30 fps) per frame for frame_time_ms=33.33.",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Empty queue treated as EOF?",
+      "status": "supported",
+      "api": "read_video_streams(...) -> {} means 'nothing ready, retry'; None means 'finished' (latches video_done)",
+      "evidence": [
+        "NV player.py:359-362: frames = source.read_video_streams(streams); if frames is None: video_done = True and break (EOF)",
+        "NV player.py:374-376: if frames is an empty mapping, next_video = now + _video_retry_delay(source) and break (retry)",
+        "NV player.py:213-218 _video_retry_delay clamps to max 0.02 s; media.py:433 default 0.02",
+        "NV media.py:470-476 default read_video_streams: returns None when read_video() is None, so default None is EOF",
+        "NV player.py:378-380 stops when (audio_done and video_done) or source.is_finished()"
+      ],
+      "notes": "An empty queue is only EOF if the source returns None. Returning {} keeps playback alive. Returning None (or is_finished() True) ends the video lane permanently (video_done latches).",
+      "live_test": "Feed a source with a 2 s gap and confirm the stream resumes without ending playback.",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Q3 hook when a viewer requests a keyframe (PLI/FIR)",
+      "status": "needs-patch",
+      "api": "none public; private: _handle_rtcp_pli(self, payload: bytes) (client.py:1929) can be wrapped by a subclass but relies on a private method",
+      "evidence": [
+        "RS udp.rs:411-412 is_rtcp_packet classifies RTCP; RS net.rs:509-514 pushes RTCP packets to Python listeners; no PLI/FIR parsing anywhere in RS (grep for PLI, PictureLoss, FIR, 206, 205 found nothing in Rust)",
+        "NV client.py:1668-1684 _handle_rtcp_packet dispatches RTCP_PAYLOAD_FEEDBACK + PLI to self._handle_rtcp_pli(body)",
+        "NV client.py:1929-1937 _handle_rtcp_pli adds media_ssrc to _video_keyframe_resend_requests only; no callback",
+        "NV client.py:2026-2045 _send_requested_video_keyframes replays cached config keyframe frames; client.py:2003-2024 caches only frames that _is_config_keyframe() identifies (SPS/PPS+IDR)",
+        "NV player.py:354-358 player consumes the tick when replay sent; if no cache, returns False and player reads the next frame normally",
+        "NV client.py:1939 send_video_pli(ssrc) is outbound PLI to the remote, not an incoming hook"
+      ],
+      "notes": "No app-level keyframe notification. The library only replays a cached SPS/PPS+IDR GOP; it does not ask the encoder for an IDR. The app therefore has no reliable way to force a keyframe on request from the pinned stack. Wrapping private _handle_rtcp_pli is possible but relies on a private method. | verifier: Status holds: no app callback. Confirmed: client.py:1668-1684 dispatches PLI (206/fmt 1) to _handle_rtcp_pli, which only adds the SSRC to _video_keyframe_resend_requests (client.py:1929-1937). Case-sensitive grep for PLI/PictureLoss/FIR/205/206 in the Rust source returns nothing; RTCP compound parsing happens in Rust (python/transport.rs:354) and Python handles it. Factual error: the cache at client.py:2000-2024 does NOT store only _is_config_keyframe frames. It stores the config keyframe and then appends every following frame (via _prepare_video_frame, client.py:2366) until video_keyframe_replay_max_frames (client.py:280 default 30, check at 2019-2021), then drops the entry. So replay is a capped GOP prefix (<=30 frames since the last config keyframe), not only the SPS/PPS+IDR.",
+      "live_test": "Connect a viewer, trigger a PLI (viewer decoder reset) and verify whether a replayed IDR appears on the wire without any app callback.",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Q4 RTCP Sender Report for the outgoing stream",
+      "status": "supported",
+      "api": "automatic; no public toggle found in the files read",
+      "evidence": [
+        "NV client.py:1139-1151 _maybe_send_audio_rtcp_sender_report: one SR per media-second for Opus",
+        "NV client.py:2375-2382 _maybe_send_video_rtcp_sender_report: one SR per media-second for video SSRC",
+        "NV client.py:2460 SR called after each successful video send",
+        "NV client.py:2047-2077 _send_rtcp_sender_report builds SR (PT 200, NTP, RTP ts, packet/octet counts) and encrypts via _get_crypto().encrypt_rtcp"
+      ],
+      "notes": "Sent automatically from Python, not from Rust. No configuration knob found in the pinned files.",
+      "live_test": "Capture RTCP on the UDP socket and confirm SR (PT 200) arrives about once per second for video SSRC.",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Q5a REMB / TWCC bandwidth estimation parsing",
+      "status": "unsupported",
+      "api": "none",
+      "evidence": [
+        "Case-insensitive grep for REMB, TWCC, transport-cc, transport_cc, bitrate_estimate, target_bitrate across DC returned no matches",
+        "Case-insensitive grep across RS returned no REMB/TWCC/transport-cc matches",
+        "NV client.py:1675-1683 handles only RR, SR, generic NACK (fmt RTCP_GENERIC_NACK) and PLI feedback"
+      ],
+      "notes": "No bandwidth estimator in the pinned stack. Receiver reports are parsed (see Q5b) but there is no REMB/TWCC consumer.",
+      "live_test": "Confirm no REMB/TWCC packets are consumed by capturing a viewer with bandwidth estimation active.",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Q5b target-bitrate / quality callback to the app",
+      "status": "supported",
+      "api": "class MySource(native_voice.media.MediaSource):\n    def on_media_sink_wants(self, wants: MediaSinkWants) -> None:  # quality requests only",
+      "evidence": [
+        "NV client.py:1597-1608 on_media_sink_wants stores Discord quality requests and forwards to player.media_source.on_media_sink_wants(wants)",
+        "NV media.py:501-512 MediaSource.on_media_sink_wants(wants) is a no-op hook with docstring about adjusting encoder/bitrate/resolution/selected stream",
+        "NV media.py:325-340 MediaSinkWants: wants (per-SSRC quality), any, pixel_counts",
+        "NV client.py:1606-1608 re-applies RID selection after a quality request",
+        "NV client.py:1524-1525 bitrate only as start_video(bitrate) argument; VideoConfig.bitrate media.py:396-404"
+      ],
+      "notes": "Hook exists for Discord-side quality requests (usable via MediaSource subclass). It is not a bandwidth-estimation signal and no mid-stream bitrate setter was found in the files read. Changing encoder bitrate mid-stream requires the app's own encoder, so classified needs-patch. | verifier: needs-patch is wrong for the quality callback because a hook does reach app code: gateway message client.py:630 -> VoiceClient.on_media_sink_wants client.py:1597-1607 -> player.media_source.on_media_sink_wants(wants) at 1602-1604 (only while a MediaPlayer exists). MediaSource.on_media_sink_wants media.py:501-512 is overridable. Bitrate/bandwidth feedback is absent: no REMB/TWCC, and the only bitrate input is start_video's bitrate argument (client.py:1524-1525). Encoder bitrate change is app-side, so the 'target bitrate' part is unsupported, not needs-patch.",
+      "live_test": "Have a viewer change quality and confirm on_media_sink_wants fires with the expected wants dict.",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Q6 negotiated codec attribute and availability",
+      "status": "supported",
+      "api": "out.negotiated_video_codec  # 'H264' or None",
+      "evidence": [
+        "NV client.py:1116-1121 VoiceClient.negotiated_video_codec property: returns self._connection.video_codec upper-cased or None",
+        "DC gateway.py:1305-1308 SESSION_DESCRIPTION sets _connection.video_codec = data['video_codec']; DC gateway.py:1315-1317 SESSION_UPDATE updates it",
+        "NV client.py:1535-1537 start_video raises when negotiated_video_codec is None",
+        "NV client.py:1101-1109 _video_params_for_source raises if source codec differs from the negotiated codec"
+      ],
+      "notes": "Set only after the voice websocket delivers SESSION_DESCRIPTION (i.e. after connect completes); None before that. StreamClient inherits the property and reads its own StreamConnectionState (NV stream_client.py:33).",
+      "live_test": "After create_stream returns, read out.negotiated_video_codec; confirm it is 'H264' before the first play().",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Q7 one account holding a watch client and an output client at once",
+      "status": "supported",
+      "api": "watch = await voice_client.watch_stream(stream_key, cls=WatchClient)\nout = await voice_client.create_stream(cls=OutClient)",
+      "evidence": [
+        "DC state.py:1187 _stream_clients keyed by StreamKey; state.py:1363-1367 add/remove by key; state.py:1379-1381 _connect_stream returns existing client only for the same key",
+        "DC stream.py:310-312 is_owner; state.py:1334-1335 output key owner_id = self.user.id; watch key owner = target",
+        "DC voice_client.py:246-249 watch_stream forbids watching own stream and requires the voice client to be connected to the stream's channel; state.py:1314-1327 maps guild stream key to the guild's single voice client",
+        "DC voice_client.py:294-303 create_stream uses the voice client's own channel",
+        "NV client.py:740-766 parent disconnect tears down all stream clients; NV stream_client.py:104-112 output disconnect calls stream.delete() unless _skip_stream_delete"
+      ],
+      "notes": "No code in the pinned stack forbids holding both. Both attach to the same parent voice client (same channel). Disconnecting the parent kills both; disconnecting one stream client deletes only its own stream. Discord server-side limits on simultaneous Go Live streams are not visible in source.",
+      "live_test": "Hold both clients in one channel and confirm both stay up; check whether the server rejects the second stream_create.",
+      "verified_live": false
+    },
+    {
+      "topic": "send",
+      "item": "Integration sketch: create_stream plus PyAV H264 test pattern and silent Opus",
+      "status": "unknown",
+      "api": "see integration_sketch (unrun)",
+      "evidence": [
+        "Built from the supported items above: NV client.py:672-738, stream_client.py:141-245, media.py:245-257, 419-516, 1412-1497, player.py:284-389"
+      ],
+      "notes": "Sketch is not run. Silent Opus payload bytes and the PyAV x264 options (aud, repeat-headers) are assumptions that the source does not verify. | verifier: The sketch is an unrun composition, not a verified capability, so 'supported' is not supported by source. Its parts are: create_stream (client.py:672-738), MediaSource/VideoFrame (media.py:245-257, 419-516), and play (client.py:1176-1295). The silent-Opus step is unnecessary per the source: if has_audio() returns False, read() is never called (NV player.py:287-290, 316), so no Opus payload is required. PyAV x264 AUD/repeat-headers settings and decoder acceptance are not settled by source. Live test: run against a test channel and check the viewer decodes.",
+      "live_test": "Run the sketch against a test channel and check the viewer decodes the test pattern and hears silence.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: VoiceClient.with_config options (sections 3, Q1)",
+      "status": "supported",
+      "api": "VoiceClient.with_config(*, rtx=, udp_qos=, codecs=, video_streams=, ffmpeg_executable=, enable_debug_stats=) -> subclass of native_voice VoiceClient",
+      "evidence": [
+        "discord/ext/native_voice/client.py:382-391 - with_config(cls, *, rtx, udp_qos, codecs, video_streams, ffmpeg_executable, enable_debug_stats); all MISSING by default.",
+        "discord/ext/native_voice/client.py:442-459 - builds attrs rtx_enabled, udp_qos_enabled, voice_codec_specs, auto_video_codec_capabilities/priority (forced False when codecs given), video_simulcast_streams, ffmpeg_executable, enable_debug_stats.",
+        "discord/ext/native_voice/client.py:392-396 - docstring: options must be on the class passed to channel.connect."
+      ],
+      "notes": "Returns the same class if no kwargs given (client.py:432-440). StreamClient.with_config is a separate classmethod with same option names but inherit semantics (stream_client.py:141-245). Did not read client.py lines 1-280 or the full Rust source for config structs.",
+      "live_test": "Connect with a subclass built from with_config(codecs=...) and confirm the IDENTIFY/SELECT_PROTOCOL codec list matches the configured list.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: codec list expression - VoiceCodec objects, encode/decode flags (Q1)",
+      "status": "supported",
+      "api": "VoiceCodec.opus(*, priority=1000, payload_type=120); VoiceCodec.video(name, *, priority, payload_type, rtx_payload_type, encode=True, decode=True)",
+      "evidence": [
+        "discord/voice_media.py:119-155 - class VoiceCodec(name, type, priority, payload_type, rtx_payload_type=None, encode=True, decode=True).",
+        "discord/voice_media.py:179-197 - VoiceCodec.opus(*, priority=1000, payload_type=120).",
+        "discord/ext/native_voice/client.py:293-300 - default voice_codec_specs: opus(120), AV1(101/102), H265(103/104), H264(105/106), VP8(107/108), VP9(109/110), all encode=False, decode=False.",
+        "discord/ext/native_voice/client.py:476-484 - _normalize_voice_codecs: TypeError if not VoiceCodec; ValueError if no Opus audio codec."
+      ],
+      "notes": "Important: the constructor default is encode=True/decode=True, but the built-in default specs are False/False and are filled in by probing. A manually supplied VoiceCodec.video(...) with defaults is advertised as encode and decode without any FFmpeg check, because get_voice_codecs only probes when auto flags are on (client.py:343-358). Priority is recomputed as index*1000 (client.py:372-374).",
+      "live_test": "Pass an explicit codecs list and confirm the advertised codec list is exactly that list, with no FFmpeg subprocess spawned.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: default codec behaviour and FFmpeg CLI probing (Q1)",
+      "status": "supported",
+      "api": "Default path: VoiceClient.codecs property (client.py:376-379) -> get_voice_codecs (client.py:335-374) -> get_local_video_codec_capabilities (codecs.py:43)",
+      "evidence": [
+        "discord/ext/native_voice/codecs.py:76-79 - ffmpeg = shutil.which(executable) if executable == 'ffmpeg'; encoders/decoders empty and encoder probe None when ffmpeg is None.",
+        "discord/ext/native_voice/codecs.py:84-89 - when ffmpeg is None, usable_encoders = () so encode=False for every codec.",
+        "discord/ext/native_voice/transcoding.py:185-188 - subprocess.run([executable, '-hide_banner', '-encoders'|'-decoders']) with creationflags=CREATE_NO_WINDOW.",
+        "discord/ext/native_voice/transcoding.py:836-844 - per-encoder usability test: subprocess.run of a 1-frame testsrc2 encode, timeout=15.",
+        "discord/ext/native_voice/client.py:362-363 - codecs with neither encode nor decode are dropped.",
+        "discord/ext/native_voice/gateway.py:1172 - SELECT_PROTOCOL payload 'codecs': [codec.to_dict() for codec in state.voice_client.codecs], so the probe runs at connect time."
+      ],
+      "notes": "Probing is cached per executable (codecs.py:72-74, 123) and refreshable via get_voice_codecs(refresh_capabilities=True). If ffmpeg is missing, no exception is raised in this path; video codecs are simply not advertised. The consequence for negotiation is inference only (start_video raises if no video codec is negotiated: client.py:1535-1537).",
+      "live_test": "Run with ffmpeg removed from PATH and check the SELECT_PROTOCOL codecs array, then check whether Discord negotiates a video codec.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: is FFmpeg CLI a hard runtime dependency on our paths (Q1)",
+      "status": "unknown",
+      "api": "VoiceClient.with_config(codecs=[...], ffmpeg_executable=...) avoids the codec probe (client.py:446-455, 343-349) at library level only",
+      "evidence": [
+        "discord/ext/native_voice/client.py:446-455 - when codecs= is passed, auto_video_codec_capabilities and auto_video_codec_priority are forced False.",
+        "discord/ext/native_voice/client.py:343-349 - capabilities probe runs only if auto_video_codec_capabilities or auto_video_codec_priority is True; otherwise capabilities = {}.",
+        "discord/ext/native_voice/media.py:4994-4995 - FFmpeg CLI existence check (shutil.which or os.path.exists) is in an FFmpeg-based sink class (EncodedVideoSink/FFmpegMuxSink family), not the voice connect path."
+      ],
+      "notes": "Voice negotiation with explicit codecs= does not spawn FFmpeg from the codec code (verified). The FFmpeg-backed media classes in media.py (e.g. FFmpegVideoSource, FFmpegMuxSink, FFmpegPCMAudio, media.py:1642-1714 and 2051+) do spawn FFmpeg. Whether our relay uses any of them is app code I did not read, so that is unknown here. | verifier: Library-side claim holds: with explicit codecs= the auto probe flags are forced False (client.py:454-455), so get_voice_codecs skips get_local_video_codec_capabilities (client.py:343-349). But the question is about OUR paths, and the relay's app code (whether it instantiates FFmpegVideoSource, FFmpegMuxSink, FFmpegSink, etc.) was not read, so the answer for our relay is unknown. Also ffmpeg_executable is used only at client.py:344 and the cache key (510), not only at 444.",
+      "live_test": "Confirm our relay does not instantiate any FFmpeg* media class, and confirm connect succeeds with ffmpeg removed when codecs= is set.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: codec renegotiation mid-call - event or callback (Q2)",
+      "status": "unsupported",
+      "api": "No event or callback. Read-only: VoiceClient.negotiated_video_codec (client.py:1117-1121).",
+      "evidence": [
+        "discord/ext/native_voice/client.py - only on_media_sink_wants is a dispatched hook (client.py:1597); no codec-change hook exists in the native_voice client.",
+        "discord/voice_state.py:222 and gateway.py:1308 - video_codec is only assigned, not dispatched.",
+        "discord/gateway.py:1221-1226 - VoiceGatewayWebSocket.session_update(codecs) sends SESSION_UPDATE; grep found no callers inside the installed package."
+      ],
+      "notes": "Verified absent: no event, dispatch, or public hook fires on a codec change. The library does not initiate codec renegotiation (session_update has no callers).",
+      "live_test": "Force a server-side SESSION_UPDATE with a different video_codec and confirm no callback fires and that negotiated_video_codec changes on the next read.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: codec renegotiation mid-call - internal handling (Q2)",
+      "status": "unknown",
+      "api": "Public read: VoiceClient.negotiated_video_codec (client.py:1117-1121). No hook fires on SESSION_UPDATE.",
+      "evidence": [
+        "discord/gateway.py:1306-1309 - SESSION_DESCRIPTION sets _connection.video_codec and audio_codec.",
+        "discord/gateway.py:1316-1318 - SESSION_UPDATE overwrites video_codec with data.get('video_codec', current) silently.",
+        "discord/ext/native_voice/client.py:317-324 - _media_player_source_changed re-applies the stream only on source change.",
+        "discord/ext/native_voice/client.py:1597-1608 - on_media_sink_wants re-applies _apply_selected_video_stream; SESSION_UPDATE does not call it.",
+        "discord/ext/native_voice/client.py:1545 - start_video uses negotiated_video_codec once at start."
+      ],
+      "notes": "The internal state change happens with no re-selection of the send pipeline codec after SESSION_UPDATE. Whether the app must restart video after a codec change is not settled by the source I read. | verifier: State change is confirmed: gateway.py:1315-1317 overwrites video_codec silently. But needs-patch means no hook reaches app code, and negotiated_video_codec is a public property that can be polled, so this does not match. The proposed trigger is wrong: on_media_sink_wants (client.py:1597-1608) runs only from the MEDIA_SINK_WANTS op (client.py:627-630), not from SESSION_UPDATE. Whether outbound frames keep the old codec after a change is not settled by source and needs a live test.",
+      "live_test": "Trigger a codec change on the voice server and check whether outbound frames keep the old codec or stop.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: reconnect flag accepted by connect / create_stream / watch (Q3)",
+      "status": "supported",
+      "api": "VoiceClient.connect(reconnect=, timeout=); VoiceClient.create_stream(reconnect=); StreamClient.connect(reconnect=, timeout=); Stream.watch(reconnect=, cls=, timeout=)",
+      "evidence": [
+        "discord/ext/native_voice/client.py:635-659 - _connect_rtc_transport and connect take reconnect: bool and forward it to self._connection.connect.",
+        "discord/ext/native_voice/client.py:677-736 - create_stream(timeout=30.0, reconnect=True, cls=...) forwards reconnect to super().create_stream.",
+        "discord/ext/native_voice/stream_client.py:408-425 - StreamClient.connect(*, reconnect, timeout, ...) stores _stream_reconnect and passes it on.",
+        "discord/voice_client.py:536-545 - VoiceClient.connect(*, reconnect, timeout, ...) forwards to _connection.connect.",
+        "discord/voice_state.py:517-520 - VoiceConnectionState.connect(*, reconnect, timeout, ...) sets self.reconnect."
+      ],
+      "notes": "Did not read Stream.watch() in discord/stream.py, so whether watch() accepts reconnect is unknown here. The flag is honoured in the places listed but does not disable every retry (see next item).",
+      "live_test": "Call create_stream(reconnect=False) and confirm the signature accepts it; check whether Stream.watch() exposes the same flag.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: reconnect=False disables all retry loops (Q3)",
+      "status": "unsupported",
+      "api": "None. reconnect=False is not a full kill switch.",
+      "evidence": [
+        "discord/voice_state.py:894-901 - the reconnect check (if not reconnect: disconnect; raise) and backoff retry come AFTER the code 4014/4022 _potential_reconnect path (918-941) and the 4015/0 resume path (863-882), which do not check the flag.",
+        "discord/voice_state.py:563-591 - _inner_connect loops range(5) with 1+2*i second waits; retries on ConnectionClosed only when reconnect is True.",
+        "discord/voice_state.py:810-812 - _poll_voice_ws is an unbounded while True loop with ExponentialBackoff.",
+        "discord/ext/native_voice/stream_client.py:617-621 - on_stream_unavailable with reconnect=False calls _disconnect_from_gateway; with True it sets _reconnect_on_available (629) and reconnects on stream_available (601-607)."
+      ],
+      "notes": "Hidden retries that ignore the flag are the resume (code 4015/0) and potential-reconnect (4014/4022) paths in voice_state.py. Stream-level reconnect is gated by _stream_reconnect (stream_client.py:602, 619). The main Discord gateway (client.py:1196 etc.) reconnect is separate and was not examined in depth.",
+      "live_test": "Kill the voice websocket with reconnect=False and observe whether resume or _potential_reconnect runs anyway.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: Rust transport (native-voice) retry or reconnect logic (Q3)",
+      "status": "unsupported",
+      "api": "None",
+      "evidence": [
+        "discord-native-voice/src/python/net.rs:50-52 - retry_would_block(send) retries only io::ErrorKind::WouldBlock on socket send.",
+        "discord-native-voice/src/python/transport.rs:184-197 - wait_until is a timing loop for precise sleeps, not a reconnect loop.",
+        "Grep over nv-src/src for reconnect|retry|backoff found no reconnect logic in transport/ or python/."
+      ],
+      "notes": "Only send-level WouldBlock retry exists in Rust; transport-level reconnect is absent (verified by search of the source). Connection retries are all in the Python discord/voice_state.py layer. | verifier: Reconnect absence is confirmed: case-insensitive grep over nv-src/src for reconnect|retry|backoff hits only net.rs. The detail is wrong: net.rs:50-63 retry_would_block retries both WouldBlock and Interrupted, bounded by SEND_WOULD_BLOCK_TIMEOUT = 50 ms (net.rs:11), not 'only WouldBlock'. transport.rs:184-197 is src/python/transport.rs, a timing loop (wait_until), as the item says.",
+      "live_test": "Not needed for absence; optionally confirm the shipped .pyd matches tag v0.1.1.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: DAVE state and epoch exposure (Q4)",
+      "status": "needs-patch",
+      "api": "Private only: VoiceClient._connection.dave_session / dave_protocol_version / can_encrypt (voice_state.py:227-230, 350-351). Possible override points: create_connection_state (client.py:624-625), _voice_websocket_hook (client.py:627-630, receives JSON ops at gateway.py:1364).",
+      "evidence": [
+        "discord/voice_state.py:227-230 - dave_session, dave_protocol_version, dave_pending_transitions, dave_downgraded on VoiceConnectionState.",
+        "discord/voice_state.py:350-351 - can_encrypt property (dave_protocol_version != 0 and session ready).",
+        "discord/voice_state.py:358-373 - reinit_dave_session(); reinit or new davey.DaveSession, sends MLS_KEY_PACKAGE.",
+        "discord/ext/native_voice/dave.py:13-14 - DAVE_PENDING_VIDEO_MAX_FRAMES=128, DAVE_PENDING_VIDEO_MAX_AGE=10.0.",
+        "discord/ext/native_voice/client.py:980-986 - _can_decrypt_dave reads dave_session.ready and can_passthrough (private)."
+      ],
+      "notes": "Epoch number is handled in gateway.py:1357-1362 (epoch==1 triggers reinit) but not stored as a public attribute. Subclassing StreamConnectionState (stream_client.py:33-70) is possible but unproven.",
+      "live_test": "Subclass VoiceClient with create_connection_state (client.py:620-621) and read dave_protocol_version and dave_session.ready after join.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: DAVE key-failure events (Q4)",
+      "status": "unsupported",
+      "api": "None",
+      "evidence": [
+        "discord/gateway.py:1383-1404 - MLS commit and welcome processing: 'except Exception:' calls state._recover_from_invalid_commit(transition_id); the exception is not re-raised or dispatched.",
+        "discord/voice_state.py:375-384 - _recover_from_invalid_commit sends MLS_INVALID_COMMIT_WELCOME then reinit.",
+        "discord/ext/native_voice/client.py:2807-2814 - audio decrypt failure: _log_packet_decode_error then return None.",
+        "discord/ext/native_voice/client.py:2983-2993 - video decrypt failure: retryable errors are queued; others logged and counted via _record_video_receive_stat('video_frame_decrypt_failures')."
+      ],
+      "notes": "Verified absent: no public event or callback for DAVE key or commit failure. Whether the counter is readable publicly depends on enable_debug_stats (not verified).",
+      "live_test": "Force an invalid MLS commit and check whether any app-visible callback fires (expected: none).",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: DAVE behaviour when a viewer joins or leaves (Q4)",
+      "status": "unknown",
+      "api": "None found",
+      "evidence": [
+        "discord/gateway.py:1321-1323 - op VIDEO updates video state via _update_video_state_streams and _connection.update_video_state.",
+        "discord/voice_state.py:292-310 - update_video_state updates ssrc_user_ids and video_ssrcs.",
+        "discord/gateway.py:1372-1404 - MLS proposals and commits arrive as binary frames; the server drives rekeying."
+      ],
+      "notes": "The library has no join or leave hook that triggers DAVE work. Rekeying is server-driven through MLS proposals/commits, so its timing on viewer join or leave is inference only. Did not verify the Discord server behaviour.",
+      "live_test": "Have a viewer join and leave the Go Live while logging DAVE transition/epoch debug lines and MLS binary ops; check passthrough and decrypt-failure counters.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: voice session_id storage and access (Q5)",
+      "status": "supported",
+      "api": "VoiceClient.session_id (public read-only property, Optional[str])",
+      "evidence": [
+        "discord/voice_state.py:201 - self.session_id: Optional[str] = None on VoiceConnectionState.",
+        "discord/voice_client.py:473-475 - VoiceClient.session_id property returns self._connection.session_id.",
+        "discord/ext/native_voice/stream_client.py:292-307 - StreamClient.create_connection_state copies parent_voice_client.session_id into StreamConnectionState and raises if None.",
+        "discord/ext/native_voice/client.py:1254 area - create_stream checks session_id is not None (client.py:727-728)."
+      ],
+      "notes": "Stream clients take a snapshot of session_id when the StreamConnectionState is created, not a live link. Did not verify that the relay's own VOICE_STATE_UPDATE is the only writer.",
+      "live_test": "Read VoiceClient.session_id after join and after a channel move and compare with the self VOICE_STATE_UPDATE session_id.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: on_voice_state_update ordering vs. library channel auto-follow (Q5)",
+      "status": "supported",
+      "api": "Override on_voice_state_update on a VoiceClient subclass (voice_client.py:314-329 abstract, 530-531 library handler). Overriding replaces the library handler, so super() must be called to keep library behaviour.",
+      "evidence": [
+        "discord/state.py:3650-3664 - parse_voice_state_update dispatches voice.on_voice_state_update(data) to the guild's voice client.",
+        "discord/voice_client.py:530-531 - VoiceClient.on_voice_state_update forwards to self._connection.voice_state_update(data).",
+        "discord/voice_state.py:424 - self.session_id = data['session_id'] is assigned BEFORE any state branching.",
+        "discord/voice_state.py:427-445 - during set_guild_voice_state: state -> got_voice_state_update and _update_voice_channel on a self move.",
+        "discord/voice_state.py:~447-448 - in connected state: self._update_voice_channel(channel_id) only; no reconnect.",
+        "discord/voice_state.py:449-466 - in connecting state with channel mismatch: soft_disconnect then connect(..., resume=False)."
+      ],
+      "notes": "Order is confirmed from code: session_id update, then state transition, then channel update or reconnect. Behavioural outcome of a move during the connected state (RTC left on old channel, or not) is not settled by source and is marked unknown in the next item.",
+      "live_test": "Move the relay bot between channels while connected and check channel_id, voice_client.channel, and whether the RTC transport reconnects.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: library auto-follow of self channel move while connected (Q5)",
+      "status": "unsupported",
+      "api": "None. The app must reconnect explicitly.",
+      "evidence": [
+        "discord/voice_state.py:~445-448 - connected state: only _update_voice_channel(channel_id); no connect/soft_disconnect call.",
+        "discord/voice_state.py:932-941 - _update_voice_channel only sets channel_id and voice_client.channel.",
+        "discord/ext/native_voice/stream_client.py:585-590 - _update_stream_state copies rtc channel and server ids from the stream, separate from the voice channel."
+      ],
+      "notes": "Verified: no automatic RTC reconnect on a connected-state move. Whether the old RTC session keeps working after the move is unknown.",
+      "live_test": "Move the relay bot while connected and observe whether media keeps flowing and whether reconnect is needed.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: platform constraints - Windows vs Linux (Q6)",
+      "status": "supported",
+      "api": "n/a",
+      "evidence": [
+        "discord/ext/native_voice/_native_voice.pyd - Windows native module is shipped in the venv (Glob result).",
+        "discord/ext/native_voice/transcoding.py:10 - CREATE_NO_WINDOW imported from discord.player for Windows subprocess flags.",
+        "discord-native-voice/src/capture/mod.rs:1,26 - #[cfg(windows)] / #[cfg(not(windows))] split for capture.",
+        "discord-native-voice/src/python/net.rs:20,27 - separate cfg(windows) and cfg(unix) socket send paths.",
+        "discord-native-voice/src/Cargo.toml (repo root) line 17 - [target.'cfg(windows)'.dependencies]."
+      ],
+      "notes": "Non-capture transport and voice paths are not Windows-gated in the source I read. Capture is Windows-specific (as expected). Did not verify the shipped .pyd was built from tag v0.1.1 source.",
+      "live_test": "Run the connect and watch path on the target Windows 11 machine with the shipped .pyd.",
+      "verified_live": false
+    },
+    {
+      "topic": "config",
+      "item": "Manifest: FFmpeg-backed media classes in media.py (not voice negotiation)",
+      "status": "unknown",
+      "api": "Classes exported in ext/native_voice/__init__.py:23-30 (FFmpegVideoSource media.py:1601, FFmpegSink media.py:4727, FFmpegMuxSink media.py:4861)",
+      "evidence": [
+        "discord/ext/native_voice/media.py:1683-1714 - FFmpeg subprocess spawn for an FFmpeg media source (Popen).",
+        "discord/ext/native_voice/media.py:4791-4802 - FFmpeg Popen for an audio writer."
+      ],
+      "notes": "Relevant only if the relay uses these classes. Our PyAV decode path and any native send path were not read, so this is unknown.",
+      "live_test": "Grep the app for FFmpeg* native_voice imports.",
+      "verified_live": false
+    }
+  ],
+  "live_results": {
+    "G1": {
+      "date": "2026-11-01",
+      "platform": "Windows 11, relay not in voice, guild with 6 members",
+      "verdict": "pass (detection via self_stream only)",
+      "observed": [
+        "VOICE_STATE_UPDATE for the target arrives without joining voice, including self_stream toggles (join, share on, off, on, leave)",
+        "STREAM_CREATE/UPDATE/DELETE are NOT received while outside voice: stream key, paused and viewer_ids only after joining",
+        "on leave the target state shows channel_id=null with self_stream still true (stale flag)"
+      ],
+      "consequence": "adapter derives stream key and incarnation from self_stream transitions; paused stays unknown until joined",
+      "not_measured": [
+        "detection latency vs. the real click (no ground-truth clock)",
+        "RESUME replay ordering (no gateway drop occurred)",
+        "stop/start with stream key reuse while in voice"
+      ],
+      "log": "scripts/m0/out/g1-20261101-192829.jsonl"
+    },
+    "G2a": {
+      "date": "2026-11-01",
+      "platform": "Windows 11 dev machine; independent viewer = target's Discord client (screenshot)",
+      "verdict": "pass",
+      "observed": [
+        "one account held the watch client and its own output Go Live for 5 min with no session takeover; both DAVE protocol v1",
+        "STREAM_CREATE is not delivered even inside voice before watching: watch by key via VoiceClient.watch_stream(StreamKey.from_guild(...)) works",
+        "source arrived as H265 (target streaming 1440p60); audio opus; parent/watch codec lists included H265 decode",
+        "output negotiated H264; viewer saw 720p30 LIVE test pattern alongside the source LIVE",
+        "static-ish source: video max inter-packet gap 1.16 s, audio 0.086 s over 5 min (input for T_dead, not the 10-min static test)",
+        "teardown order output_stop -> output_disconnect -> stop_listening -> watch_disconnect -> vc_disconnect, clean"
+      ],
+      "not_measured": [
+        "request_video effect on received layer (source bitrate ~0.6 Mbps observed)",
+        "viewer join latency",
+        "DAVE epoch change with viewers joining/leaving (G4)"
+      ],
+      "log": "scripts/m0/out/g2a-20261101-*.jsonl"
+    },
+    "G2b": {
+      "date": "2026-11-01",
+      "platform": "Windows 11 laptop (Ryzen 7 8840H, Radeon 780M) that is also the target's machine; viewer = target's Discord client",
+      "verdict": "partial: relay of real content with audio works and the viewer confirmed smooth 1080p60; no single 30-min run yet (longest 15.4 min, all ended by operator restarts or the target stopping the share)",
+      "observed": [
+        "source 2304x1440 60 fps H265 + opus; output H264 1728x1080 ~60 fps, 8 Mbps, viewer badge '1080P 60FPS'",
+        "0 decode errors across ~17 runs; IDR gap <= 1.95 s; relay pipeline latency ~70-130 ms",
+        "source arrival is bursty (1/3 of frames < 2 ms apart, gaps up to ~0.3-0.4 s) while source RTP spacing is a steady 60 fps with ~10% 33 ms gaps (capture drops)",
+        "CFR resampling repeated ~45% of frames; source pacing (send each frame when ready, fixed or next-frame duration, video_realtime=False) fixed it",
+        "20 Mbps caused Discord error 2003 on the shared uplink; 8 Mbps did not in the runs after",
+        "h264_amf encode ~2 ms/frame, worker CPU ~93% vs ~160% with libx264; d3d11va decode raised latency to ~240 ms on this iGPU (kept off by default)",
+        "target stop -> relay stop request 75 ms -> relay Go Live ended 335 ms (gate-close target < 1 s met)",
+        "main process healthy during hitches: wake lag <= 3.5 ms, no GC pauses; remaining hitches come from network arrival gaps"
+      ],
+      "not_measured": [
+        "30-minute continuous run",
+        "viewer join latency p50/p95",
+        "A/V sync with flash/beep",
+        "slow-viewer (1.5 Mbps) behaviour"
+      ],
+      "logs": "scripts/m0/out/g2b-console*.txt"
+    },
+    "G2c": {
+      "date": "2026-11-01",
+      "verdict": "pass: one ingest account  watched the target and published; a second relay account published the same encoded AUs in the same voice; viewer saw 3 LIVE streams (source 1440p60, two relays 1080p60)",
+      "observed": [
+        "single decode+encode (h264_amf, 1824x1080) fanned out; second account joined ~8 s later, negotiated H264",
+        "only the ingest account consumed a viewer slot of the target stream",
+        "smoothness-first buffer (max lateness 20 s, cap 600 ms): most 5 s windows had 0 send gaps > 50 ms on both accounts; latency ~0.3-0.6 s",
+        "audio held for the video delay: 0 dropped PCM blocks after fast-rise/slow-fall tracking",
+        "remaining 0.7-1.2 s stalls hit both accounts at once (source arrival outages) while the same laptop uploaded the 1440p source plus 2 x 8 Mbps relays; viewer saw Discord error 2002"
+      ],
+      "not_measured": [
+        "more than 2 relay accounts",
+        "per-account kick/move -> quarantine live",
+        "50+ viewers"
+      ],
+      "logs": "scripts/m0/out/g2c-console*.txt"
+    },
+    "V-LOGIN": {
+      "date": "2026-11-09",
+      "platform": "Windows 11 dev machine; Rust throwaway probe with wreq 0.16.3 + wreq-util 0.2.0 (Emulation::Chrome147), real account, no user ids recorded",
+      "verdict": "pass",
+      "observed": [
+        "info API (cordapi POST /api/v2/properties/web) answered: client_build_number 667580, browser_version 158.0.0.0",
+        "REST GET /api/v9/users/@me -> 200 with the cordapi 'encoded' X-Super-Properties and its browser_user_agent",
+        "gateway v9 HELLO heartbeat_interval 41250 ms; IDENTIFY with capabilities 22525 and the cordapi properties (+ extra_gateway_properties) -> READY",
+        "3 heartbeat ACKs over 144 s, no close, no INVALID_SESSION"
+      ],
+      "not_measured": [
+        "zstd-stream transport and RESUME against the real gateway (covered by local fakes only)",
+        "QOS heartbeat (op 40) against the real gateway: the probe used plain op 1; the port follows discord.py-self (op 40)"
+      ],
+      "log": "none (throwaway probe, output not kept)"
+    },
+    "V-DAVE": {
+      "date": "2026-11-09",
+      "platform": "Windows 11 dev machine; Rust relayctl dev watch (release build), davey 0.2.0",
+      "verdict": "pass",
+      "observed": [
+        "gateway v9 zstd-stream IDENTIFY -> READY; voice join; watch by stream key; stream voice connection",
+        "DAVE protocol v1 on both voice and watch connections, status ACTIVE epoch 1, can_decrypt_target true",
+        "source H265 1728x1080 ~60 fps: 4362 video RTP packets, 3591 access units assembled in 60 s, first keyframe 0.13 s after first packet",
+        "audio opus: 3002 packets, 1 DAVE decrypt failure (at epoch transition); 0 transport decrypt failures",
+        "gateway WebSocket upgrade returns 403 when an Origin header is sent through wreq; handshake sends no Origin"
+      ],
+      "not_measured": [
+        "voice/stream WS resume",
+        "reconnect after gateway drop",
+        "H264/AV1/VP8/VP9 sources"
+      ]
+    },
+    "V-RELAY": {
+      "date": "2026-11-09",
+      "platform": "Windows 11 dev machine; Rust relayctl dev relay (release build); viewer = second relay account in the same process (relayctl dev relay --viewer-credential)",
+      "verdict": "pass",
+      "observed": [
+        "relay account watched the target (H265 1728x1080 ~60 fps, DAVE v1) and published its own Go Live in the same voice channel; viewer account watched it under DAVE v1",
+        "output first negotiated AV1; adaptive codec controller updated the output codec list and swapped in place to H265 (passthrough, no reconnect)",
+        "90 s: relay watched 5537 frames, published 4947 video and 4572 audio frames, 0 DAVE encrypt errors, 0 send errors; viewer assembled 4871 frames (H265 1728x1080, 10 keyframes), fps_avg 54.1, 4500 audio packets, 4 DAVE decrypt failures",
+        "viewer fps mostly 57-60 with two windows at 38-47 fps; worker backpressure_skips 245 while the relay's receive rate also fluctuated 52-69 fps (bursty source arrival, as in G2b/G2c)",
+        "viewer PLI reached the relay (2) and was forwarded upstream; op 22 paused=false after create caused no error; teardown clean (viewer leave, op 19, watch stop, voice leave, gateway close)"
+      ],
+      "not_measured": [
+        "runs longer than 90 s",
+        "a human viewer in the Discord client",
+        "separate output accounts (mirror/autoscale)",
+        "H264/AV1/VP8/VP9 sources"
+      ]
+    }
+  }
+}

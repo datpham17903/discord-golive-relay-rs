@@ -1,0 +1,38 @@
+Discord Go Live Relay (Rust port)
+
+Ported from the Python implementation at Discord-Relay-Bot (MIT).
+
+Files vendored from third-party projects carry their source, commit and
+licence in a header comment and are listed here as they are added.
+
+----------------------------------------------------------------------
+discord-native-voice (vendored into crates/relay-voice)
+
+Source:  https://github.com/dolfies/discord-native-voice
+Commit:  18bbd204bfe46a781bee37cc8c10d574bdf435dd
+Files:   src/transport/{mod,crypto,udp}.rs, src/rtp/mod.rs,
+         src/video/{mod,common,h26x,h264,h265,vp8,vp9,av1}.rs and the
+         non-pyo3 parts of src/python/{net,transport,video,video_send}.rs.
+         Each vendored file starts with a header naming its original path.
+
+The MIT License (MIT)
+
+Copyright (c) 2026-present Dolfies
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.

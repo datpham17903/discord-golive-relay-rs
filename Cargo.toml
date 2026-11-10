@@ -1,0 +1,47 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/relay-media",
+    "crates/relay-core",
+    "crates/relay-discord",
+    "crates/relay-voice",
+    "crates/relayctl",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+
+[workspace.dependencies]
+aes-gcm = "0.10"
+anyhow = "1"
+base64 = "0.22"
+bytes = "1"
+chacha20poly1305 = "0.10"
+clap = { version = "4", features = ["derive"] }
+davey = "=0.2.0"
+fastrand = "2"
+fs4 = "1"
+futures-util = "0.3"
+getrandom = "0.4"
+indexmap = "2"
+parking_lot = "0.12"
+saphyr = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+socket2 = "0.6"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tokio-tungstenite = "0.30"
+uuid = { version = "1", features = ["v4"] }
+wiremock = "0.6"
+wreq = { version = "=0.16.3", features = ["ws", "json", "gzip", "brotli", "zstd", "cookies"] }
+wreq-util = "=0.2.0"
+zstd = "0.14"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

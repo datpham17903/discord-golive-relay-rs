@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.bin binary
+*.h264 binary
+*.h265 binary
+*.ivf binary
+*.obu binary
+*.opus binary

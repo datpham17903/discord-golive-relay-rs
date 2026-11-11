@@ -1,8 +1,9 @@
 //! Local control socket: a Unix socket, one JSON request line in, one JSON response line out
-//! (port of `control/server.py`). Not available on Windows, where [`ControlServer::create`] is `None`.
+//! (port of `control/server.py`). On Windows the same protocol runs over a named pipe whose name is
+//! derived from the socket path ([`pipe_name`]).
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,17 +16,30 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// `handler(request) -> response`; runs on the connection's task, so it must not block for long.
 pub type Handler = Arc<dyn Fn(&Value) -> Value + Send + Sync>;
 
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(any(unix, windows)), allow(dead_code))]
 pub struct ControlServer {
     path: PathBuf,
     handler: Handler,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// The Windows named pipe standing for the control socket at `path`: a hash of its absolute path
+/// (lowercased: Windows paths ignore case), so services with different state directories never share
+/// a pipe, and `relayctl --state-dir` reaches the service whose `storage.state_directory` it names.
+pub fn pipe_name(path: &Path) -> String {
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let key = path.to_string_lossy().to_lowercase();
+    // FNV-1a 64: stable across builds and platforms, unlike `DefaultHasher`
+    let hash = key.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    format!(r"\\.\pipe\discord-relay-{hash:016x}")
+}
+
 impl ControlServer {
-    /// `None` where Unix sockets are not used (Windows).
+    /// `None` where neither Unix sockets nor named pipes exist.
     pub fn create(path: impl Into<PathBuf>, handler: Handler) -> Option<Self> {
-        cfg!(unix).then(|| Self {
+        cfg!(any(unix, windows)).then(|| Self {
             path: path.into(),
             handler,
             task: None,
@@ -63,15 +77,52 @@ impl ControlServer {
         Ok(())
     }
 
-    #[cfg(not(unix))]
+    /// Creates the first instance of [`pipe_name`] and serves it, one instance per client.
+    ///
+    /// The pipe keeps its default DACL: only this user, SYSTEM and administrators may write to it
+    /// (everyone else may at most open it for reading, which cannot send a request); remote clients
+    /// are rejected. There is no peer uid, so requests carry `_peer_uid: null`.
+    #[cfg(windows)]
+    pub async fn start(&mut self) -> io::Result<()> {
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let name = pipe_name(&self.path);
+        // Fails rather than add instances to a pipe someone else created under this name.
+        let mut listening = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)?;
+        let handler = Arc::clone(&self.handler);
+        self.task = Some(tokio::spawn(async move {
+            loop {
+                let connected = listening.connect().await;
+                // The next instance listens before this one is served; meanwhile clients retry.
+                let next = loop {
+                    match ServerOptions::new().create(&name) {
+                        Ok(next) => break next,
+                        Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                    }
+                };
+                let stream = std::mem::replace(&mut listening, next);
+                if connected.is_ok() {
+                    let handler = Arc::clone(&handler);
+                    tokio::spawn(async move {
+                        serve(stream, None, &handler, MAX_REQUEST_BYTES).await;
+                    });
+                }
+            }
+        }));
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub async fn start(&mut self) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "control socket is not available on Windows",
+            "control socket is not available on this platform",
         ))
     }
 
-    /// Stops listening and removes the socket file.
+    /// Stops listening and removes the socket file (Windows: the pipe goes once its instances close).
     pub fn close(&mut self) {
         if let Some(task) = self.task.take() {
             task.abort();
@@ -188,10 +239,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pipe_name_follows_the_absolute_path() {
+        let rel = Path::new("state").join("control.sock");
+        let abs = std::env::current_dir().unwrap().join(&rel);
+        assert_eq!(pipe_name(&rel), pipe_name(&abs));
+        assert_ne!(
+            pipe_name(&rel),
+            pipe_name(&Path::new("other").join("control.sock"))
+        );
+        let name = pipe_name(&rel);
+        let hash = name.strip_prefix(r"\\.\pipe\discord-relay-").unwrap();
+        assert!(hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
     #[cfg(windows)]
     #[test]
-    fn unavailable_on_windows() {
-        assert!(ControlServer::create("c.sock", echo()).is_none());
+    fn pipe_name_ignores_case_on_windows() {
+        assert_eq!(
+            pipe_name(Path::new(r"C:\Relay\State\control.sock")),
+            pipe_name(Path::new(r"c:\relay\state\control.sock"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn named_pipe_roundtrip_one_instance_per_client() {
+        use tokio::net::windows::named_pipe::ClientOptions;
+
+        const ERROR_FILE_NOT_FOUND: i32 = 2;
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("control.sock");
+        let name = pipe_name(&sock);
+        let mut srv = ControlServer::create(&sock, echo()).unwrap();
+        srv.start().await.unwrap();
+        for _ in 0..3 {
+            let mut c = ClientOptions::new().open(&name).unwrap();
+            c.write_all(b"{\"cmd\": \"status\", \"_peer_uid\": 0}\n")
+                .await
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(c).read_line(&mut line).await.unwrap();
+            let resp: Value = serde_json::from_str(&line).unwrap();
+            // no peer uid on Windows, and never the client's own claim
+            assert_eq!(resp, json!({"ok": true, "echo": "status", "peer": null}));
+        }
+        // a second server for the same state directory is refused
+        let mut twin = ControlServer::create(&sock, echo()).unwrap();
+        assert!(twin.start().await.is_err());
+        srv.close();
+        let gone = async {
+            while ClientOptions::new()
+                .open(&name)
+                .err()
+                .and_then(|e| e.raw_os_error())
+                != Some(ERROR_FILE_NOT_FOUND)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), gone)
+            .await
+            .expect("pipe removed after close");
     }
 
     #[cfg(unix)]

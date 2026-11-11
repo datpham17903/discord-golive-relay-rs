@@ -190,10 +190,16 @@ fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
 
 // ---------------------------------------------------------------- state commands
 
+/// Whether a running service may be listening: its socket file on Unix. A Windows named pipe has no
+/// file, so there [`send_request`] finds out (no pipe: `None`).
+fn may_listen(socket: &Path) -> bool {
+    cfg!(windows) || socket.exists()
+}
+
 /// The running service's reply to one request on `control.sock`, `None` when it cannot be reached.
 ///
-/// One request line, one response line, 5 s timeouts. Windows has no control socket, so every state
-/// command takes the offline path below.
+/// One request line, one response line, 5 s timeouts. On Windows the request goes over the service's
+/// named pipe ([`pipe_name`](relay_core::control::server::pipe_name) of the same path).
 #[cfg(unix)]
 fn send_request(socket: &Path, request: &Value) -> Option<Value> {
     use std::io::{BufRead, BufReader};
@@ -210,7 +216,53 @@ fn send_request(socket: &Path, request: &Value) -> Option<Value> {
     serde_json::from_str(&line).ok()
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn send_request(socket: &Path, request: &Value) -> Option<Value> {
+    let name = relay_core::control::server::pipe_name(socket);
+    let line = format!("{request}\n");
+    // Own thread and runtime: the caller may already be inside one.
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        rt.block_on(pipe_request(&name, &line))
+    })
+    .join()
+    .ok()
+    .flatten()
+}
+
+#[cfg(windows)]
+async fn pipe_request(name: &str, line: &str) -> Option<Value> {
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let exchange = async {
+        let mut pipe = loop {
+            match ClientOptions::new().open(name) {
+                Ok(pipe) => break pipe,
+                // every instance is taken: the service is creating the next one
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(_) => return None,
+            }
+        };
+        pipe.write_all(line.as_bytes()).await.ok()?;
+        let mut resp = String::new();
+        BufReader::new(pipe).read_line(&mut resp).await.ok()?;
+        serde_json::from_str(&resp).ok()
+    };
+    tokio::time::timeout(Duration::from_secs(5), exchange)
+        .await
+        .ok()
+        .flatten()
+}
+
+#[cfg(not(any(unix, windows)))]
 fn send_request(_socket: &Path, _request: &Value) -> Option<Value> {
     None
 }
@@ -262,7 +314,7 @@ fn account_latch_set(st: &PersistedState, user_id: Option<u64>) -> bool {
 
 fn state_command(cmd: &str, state_dir: &Path, account: Option<u64>, ctx: &mut Ctx<'_>) -> i32 {
     let sock = state_dir.join(SOCKET_NAME);
-    if sock.exists() {
+    if may_listen(&sock) {
         let request = match account {
             None => json!({"cmd": cmd}),
             Some(uid) => json!({"cmd": cmd, "account": uid.to_string()}),
@@ -342,7 +394,7 @@ fn accounts_view(st: &PersistedState) -> Value {
 
 fn status(state_dir: &Path, ctx: &mut Ctx<'_>) -> i32 {
     let sock = state_dir.join(SOCKET_NAME);
-    if sock.exists()
+    if may_listen(&sock)
         && let Some(resp) = send_request(&sock, &json!({"cmd": "status"}))
     {
         ctx.say(&serde_json::to_string_pretty(&resp).unwrap_or_default());
@@ -679,7 +731,7 @@ fn run_relay(args: &RunArgs, ctx: &mut Ctx<'_>) -> i32 {
     rt.block_on((ctx.run_service)(cfg, Token::new(token), metrics_listen))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use std::sync::Arc;
 
@@ -704,6 +756,10 @@ mod tests {
                 .unwrap();
         assert_eq!(resp, Some(json!({"ok": true, "echo": "status"})));
         srv.close();
-        assert_eq!(send_request(&sock, &json!({"cmd": "status"})), None);
+        let resp =
+            tokio::task::spawn_blocking(move || send_request(&sock, &json!({"cmd": "status"})))
+                .await
+                .unwrap();
+        assert_eq!(resp, None);
     }
 }

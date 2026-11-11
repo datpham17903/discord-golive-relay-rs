@@ -475,7 +475,13 @@ pub fn default_slate_builder() -> SlateBuilder {
 }
 
 /// Python `_is_operator`: the peer is root or this process's own user; unknown is refused.
+///
+/// Windows has no peer uid: the control pipe's default DACL already lets only this user, SYSTEM
+/// and administrators send a request, so every peer is an operator.
 pub fn root_is_operator() -> OperatorCheck {
+    if cfg!(windows) {
+        return Arc::new(|_| true);
+    }
     let own = own_uid();
     Arc::new(move |uid: Option<u64>| uid.is_some() && (uid == Some(0) || uid == own))
 }

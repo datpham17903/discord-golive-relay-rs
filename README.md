@@ -252,7 +252,7 @@ relayctl run      --config config.yaml
 
 A fresh install is disabled. Run `relayctl enable` once. The service then relays automatically whenever the target shares in the allowed voice channel. It stops when the target stops sharing, leaves or moves, or when you run `relayctl disable` (or SIGINT/SIGTERM). Runtime state (enabled flag, FATAL latch, quarantine, rejection counter) is in `state.json` inside the state directory; the config is never modified.
 
-Windows note: the control socket is a Unix socket and does not exist on Windows. There, `enable`, `disable` and `reset-fatal` change `state.json` directly and `status` reads the files, so run them while the service is stopped or after it exited.
+Windows note: there the control channel is a named pipe, `\\.\pipe\discord-relay-<16 hex digits>`, derived from the absolute path of `control.sock` in the state directory (so `--state-dir` must resolve to the same absolute path as `storage.state_directory`). It keeps the default pipe security: only the user running the service, SYSTEM and administrators can send a request, and each such request counts as an operator (Windows has no uid check). When no service answers on the pipe, `enable`, `disable` and `reset-fatal` change `state.json` directly and `status` reads the files.
 
 ### Monitoring
 

@@ -242,6 +242,47 @@ fn status_without_service_shows_persisted_state() {
     assert_eq!(out["desired_enabled"], json!(false));
 }
 
+/// Windows: the state commands ask the service over its named pipe and fall back to the files once
+/// the pipe is gone.
+#[cfg(windows)]
+#[test]
+fn state_commands_use_the_named_pipe_then_fall_back_to_state_json() {
+    use relay_core::control::server::ControlServer;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut srv = ControlServer::create(
+        dir.join(cli::SOCKET_NAME),
+        Arc::new(
+            |req| json!({"ok": true, "via": "pipe", "cmd": req["cmd"], "peer": req["_peer_uid"]}),
+        ),
+    )
+    .unwrap();
+    rt.block_on(srv.start()).unwrap();
+    let h = Harness::new();
+    let r = h.main(&state_args("enable", s(dir)));
+    assert_eq!(r.code, 0, "{}", r.err);
+    let resp: Value = serde_json::from_str(&r.out).unwrap();
+    assert_eq!(
+        resp,
+        json!({"ok": true, "via": "pipe", "cmd": "enable", "peer": null})
+    );
+    let r = h.main(&state_args("status", s(dir)));
+    let resp: Value = serde_json::from_str(&r.out).unwrap();
+    assert_eq!(resp["via"], "pipe");
+    // the service answered: nothing was written offline
+    assert!(!dir.join("state.json").exists());
+
+    srv.close();
+    let r = h.main(&state_args("enable", s(dir)));
+    assert_eq!(r.code, 0, "{}", r.err);
+    let resp: Value = serde_json::from_str(&r.out).unwrap();
+    assert!(resp.get("via").is_none() && resp["desired_enabled"] == json!(true));
+    assert!(StateStore::new(dir).load().unwrap().desired_enabled);
+    drop(rt);
+}
+
 #[test]
 fn reset_fatal_account_only_that_account() {
     let tmp = tempfile::tempdir().unwrap();

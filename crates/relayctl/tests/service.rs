@@ -1153,6 +1153,8 @@ service_test!(test_offline_disable_is_picked_up, async {
     env.shutdown(task).await;
 });
 
+// Windows: the control pipe's DACL is the operator check (see the next test).
+#[cfg(unix)]
 service_test!(test_enable_and_reset_fatal_are_operator_only, async {
     let env = env(Setup::default());
     for cmd in ["enable", "reset-fatal"] {
@@ -1162,6 +1164,29 @@ service_test!(test_enable_and_reset_fatal_are_operator_only, async {
             assert!(resp["error"].as_str().unwrap().contains("operator-only"));
         }
     }
+});
+
+#[cfg(windows)]
+service_test!(test_control_pipe_peer_is_operator_on_windows, async {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    let env = env(Setup::default());
+    env.update(|mut s| {
+        s.desired_enabled = false;
+        s
+    });
+    let task = env.start();
+    wait_until(|| env.adapter_started(0)).await;
+    let name = relay_core::control::server::pipe_name(&env.dir.join("control.sock"));
+    let mut pipe = ClientOptions::new().open(&name).unwrap();
+    pipe.write_all(b"{\"cmd\": \"enable\"}\n").await.unwrap();
+    let mut line = String::new();
+    BufReader::new(pipe).read_line(&mut line).await.unwrap();
+    let resp: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(resp["ok"], json!(true), "{resp}");
+    assert!(env.load().desired_enabled);
+    assert_eq!(env.shutdown(task).await, 0);
 });
 
 // ------------------------------------------------------------------ output accounts

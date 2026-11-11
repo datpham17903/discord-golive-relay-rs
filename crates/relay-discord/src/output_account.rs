@@ -7,13 +7,13 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use relay_core::config::{CodecPolicy, OutputAccount, OutputCodec, RelayConfig};
 use relay_core::supervisor::outputs_model::PoolEvent;
 use relay_media::codec::VoiceCodec;
-use relay_voice::connection::RtcSettings;
+use relay_voice::connection::{RECONNECT_TIMEOUT, RtcSettings};
 use relay_voice::voice_ws::{StreamSpec, video_codec_list};
 use relay_voice::{ClientEvent, JoinOptions, StreamClient, VoiceClient, VoiceClientConfig};
 use serde_json::{Value, json};
@@ -561,7 +561,31 @@ impl Inner {
     }
 }
 
-/// A dropped stream or voice connection without a voice-state change is reported once as unhealthy.
+/// `watch_health`'s verdict over successive polls. A stream or voice connection that is down but
+/// on its way back (server move, forced close waiting for a server) is tolerated for up to
+/// [`RECONNECT_TIMEOUT`]; one that gave up (`ClientEvent::Disconnected`) is not.
+#[derive(Default)]
+struct HealthWatch {
+    recovering_since: Option<Instant>,
+}
+
+impl HealthWatch {
+    /// `up`: both connections are live; `recovering`: each is live or reconnecting.
+    fn healthy(&mut self, up: bool, recovering: bool, now: Instant) -> bool {
+        if up {
+            self.recovering_since = None;
+            return true;
+        }
+        if !recovering {
+            return false;
+        }
+        let since = *self.recovering_since.get_or_insert(now);
+        now.saturating_duration_since(since) < RECONNECT_TIMEOUT
+    }
+}
+
+/// A dropped stream or voice connection without a voice-state change is reported once as
+/// unhealthy (see [`HealthWatch`] for reconnects).
 async fn watch_health(
     adapter: Weak<Inner>,
     generation: u64,
@@ -569,11 +593,14 @@ async fn watch_health(
     out: StreamClient,
     vc: VoiceClient,
 ) {
+    let mut health = HealthWatch::default();
     loop {
         let Some(inner) = adapter.upgrade() else {
             return;
         };
-        if !(out.is_connected() && vc.is_connected()) {
+        let (out_up, vc_up) = (out.is_connected(), vc.is_connected());
+        let recovering = (out_up || out.is_reconnecting()) && (vc_up || vc.is_reconnecting());
+        if !health.healthy(out_up && vc_up, recovering, Instant::now()) {
             inner.emit(PoolEvent::OutHealth {
                 account: inner.opts.user_id,
                 generation,

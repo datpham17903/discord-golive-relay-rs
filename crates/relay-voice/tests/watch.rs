@@ -962,6 +962,7 @@ async fn test_stream_websocket_close_is_reported_and_the_gateway_told() {
         other => panic!("{other:?}"),
     }
     assert!(!stream.is_connected());
+    assert!(!stream.is_reconnecting(), "gave up");
     rig.wait_seen(&format!("stream_delete:{}", stream_key()))
         .await;
     assert!(matches!(
@@ -1164,6 +1165,7 @@ async fn test_forced_close_waits_for_the_stream_server_update() {
     stream.listen(move |p| drop(tx.send(p))).unwrap();
 
     // 4014 before the gateway's STREAM_SERVER_UPDATE: wait for it instead of giving up
+    assert!(!stream.is_reconnecting());
     first.ctl.send(Ctl::Close(4014)).unwrap();
     let deadline = tokio::time::Instant::now() + WAIT;
     while stream.is_connected() {
@@ -1175,6 +1177,7 @@ async fn test_forced_close_waits_for_the_stream_server_update() {
         rig.events.try_recv().is_err(),
         "nothing reported while waiting"
     );
+    assert!(stream.is_reconnecting());
     assert!(!rig.seen().iter().any(|s| s.starts_with("stream_delete")));
 
     rig.client.handle_event(LinkEvent::StreamServerUpdate {
@@ -1189,6 +1192,7 @@ async fn test_forced_close_waits_for_the_stream_server_update() {
         }
     );
     assert_eq!(stream.own_ssrc().unwrap(), OWN_STREAM_SSRC + 1);
+    assert!(stream.is_connected() && !stream.is_reconnecting());
     let identify = second.wait_message(0).await;
     assert_eq!(identify["d"]["token"], "FAKE-new-token");
     wait_user(&stream, MEDIA_SSRC).await;
@@ -1241,6 +1245,7 @@ async fn test_voice_server_moves_mid_session() {
         rig.events.try_recv().is_err(),
         "nothing reported while waiting"
     );
+    assert!(rig.client.is_reconnecting());
     rig.client
         .handle_event(voice_server_update(&third.endpoint, "FAKE-voice-token-3"));
     assert_eq!(
@@ -1251,7 +1256,7 @@ async fn test_voice_server_moves_mid_session() {
         third.wait_message(0).await["d"]["token"],
         "FAKE-voice-token-3"
     );
-    assert!(rig.client.is_connected());
+    assert!(rig.client.is_connected() && !rig.client.is_reconnecting());
     // never left nor re-joined the channel
     assert_eq!(rig.seen(), [format!("voice_state:Some({CHANNEL})")]);
 }

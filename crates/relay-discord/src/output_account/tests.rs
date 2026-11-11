@@ -504,3 +504,33 @@ fn output_options_follow_the_config() {
     );
     assert_eq!(opts.parent_codecs.len(), 5, "adaptive offers every codec");
 }
+
+#[test]
+fn health_tolerates_a_reconnect_until_it_gives_up_or_times_out() {
+    let t0 = Instant::now();
+    let mut health = HealthWatch::default();
+    assert!(health.healthy(true, true, t0));
+    // a server move or forced close: down but reconnecting
+    assert!(health.healthy(false, true, t0 + Duration::from_secs(1)));
+    assert!(health.healthy(false, true, t0 + Duration::from_secs(20)));
+    // back up: the clock starts over for the next reconnect
+    assert!(health.healthy(true, true, t0 + Duration::from_secs(21)));
+    let next = t0 + Duration::from_secs(40);
+    assert!(health.healthy(false, true, next));
+    assert!(health.healthy(
+        false,
+        true,
+        next + RECONNECT_TIMEOUT - Duration::from_millis(1)
+    ));
+    assert!(
+        !health.healthy(false, true, next + RECONNECT_TIMEOUT),
+        "a reconnect that takes too long"
+    );
+
+    // the client gave up (ClientEvent::Disconnected): no longer reconnecting
+    let mut health = HealthWatch::default();
+    assert!(health.healthy(false, true, t0));
+    assert!(!health.healthy(false, false, t0 + Duration::from_millis(10)));
+    // a plain drop is reported at once
+    assert!(!HealthWatch::default().healthy(false, false, t0));
+}

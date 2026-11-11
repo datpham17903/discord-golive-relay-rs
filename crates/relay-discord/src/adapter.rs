@@ -871,9 +871,11 @@ impl Inner {
         }
     }
 
+    /// A voice connection on its way back (server move, forced close waiting for a server) counts
+    /// as alive; the voice client gives up on its own within `RECONNECT_TIMEOUT`.
     fn voice_alive(&self) -> bool {
         let vc = self.st.lock().vc.clone();
-        vc.is_some_and(|vc| vc.is_connected())
+        vc.is_some_and(|vc| vc.is_connected() || vc.is_reconnecting())
     }
 
     /// Disconnects `vc` (already unregistered) while it still receives the dispatches it waits for.

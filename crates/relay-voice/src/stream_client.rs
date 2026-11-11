@@ -535,6 +535,16 @@ impl StreamClient {
             .is_some_and(|c| !c.is_closed())
     }
 
+    /// Not connected, but on the way back: the stream moved to another server, a forced close waits
+    /// for one, `reconnect` handshakes again, or the connection has just closed and the client is
+    /// deciding what to do. Ends with a new connection ([`ClientEvent::Reconnected`]) or with the
+    /// stream torn down ([`ClientEvent::Disconnected`]), within about
+    /// [`RECONNECT_TIMEOUT`]. A websocket resume keeps [`StreamClient::is_connected`] true.
+    pub fn is_reconnecting(&self) -> bool {
+        let st = self.inner.state.lock();
+        !st.ended && (st.reconnecting || st.conn.as_ref().is_some_and(|c| c.is_closed()))
+    }
+
     /// Our own SSRC on the stream connection (the sender SSRC of RTCP feedback).
     pub fn own_ssrc(&self) -> Result<u32, VoiceError> {
         Ok(self.conn()?.ssrc())

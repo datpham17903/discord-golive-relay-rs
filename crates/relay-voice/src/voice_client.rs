@@ -220,6 +220,16 @@ impl VoiceClient {
         st.phase == Phase::Connected && st.conn.as_ref().is_some_and(|c| !c.is_closed())
     }
 
+    /// Joined but without a live media connection, on the way back: the voice server moved, a
+    /// forced close waits for the gateway to name one, `reconnect` handshakes again, or the
+    /// connection has just closed and the client is deciding what to do. Ends with a new connection
+    /// ([`ClientEvent::Reconnected`]) or [`ClientEvent::Disconnected`], within about
+    /// [`RECONNECT_TIMEOUT`]. A websocket resume keeps [`VoiceClient::is_connected`] true.
+    pub fn is_reconnecting(&self) -> bool {
+        let st = self.inner.state.lock();
+        st.phase == Phase::Connected && st.conn.as_ref().is_none_or(|c| c.is_closed())
+    }
+
     /// Negotiated media session of the voice connection (`audio_codec`, `video_codec`...).
     pub fn session_info(&self) -> Option<SessionInfo> {
         self.inner

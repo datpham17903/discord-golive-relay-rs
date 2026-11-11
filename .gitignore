@@ -2,4 +2,3 @@ target/
 secrets/
 config.yaml
 state/
-manifests/verified-profiles.json

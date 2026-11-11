@@ -472,15 +472,8 @@ fn manifest(cfg_path: &Path, name: &str) -> Result<Value, String> {
 }
 
 fn operable_errors(cfg: &RelayConfig, cfg_path: &Path) -> Vec<String> {
-    let manifests =
-        manifest(cfg_path, &cfg.liveness.verified_capability_manifest).and_then(|cap| {
-            Ok((
-                cap,
-                manifest(cfg_path, &cfg.quality.approved_profile_manifest)?,
-            ))
-        });
-    match manifests {
-        Ok((cap, prof)) => check_operable(cfg, &cap, &prof),
+    match manifest(cfg_path, &cfg.liveness.verified_capability_manifest) {
+        Ok(cap) => check_operable(cfg, &cap),
         Err(e) => vec![format!("manifest: {e}")],
     }
 }

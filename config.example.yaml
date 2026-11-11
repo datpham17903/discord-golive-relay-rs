@@ -38,7 +38,6 @@ quality:
   fixed_fps: 60
   video_bitrate_kbps: auto   # auto | kbps; only used when re-encoding (passthrough keeps the target's own bitrate). auto: ~7.8 Mbps at 1080p60, 12 Mbps at 1440p60 (cap; 20000 caused Discord error 2003 in G2b)
   audio_bitrate_kbps: 128    # used only with codecs.audio_mode: transcode
-  approved_profile_manifest: "manifests/verified-profiles.json"
 
 audio:
   enabled: true

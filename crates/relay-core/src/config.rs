@@ -54,6 +54,7 @@ pub const COMMAND_NAMES: &[&str] = &[
 pub const DEFAULT_PUBLIC_COMMANDS: &[&str] = &["status", "mirror", "unmirror"];
 const LOG_LEVELS: &[&str] = &["CRITICAL", "DEBUG", "ERROR", "INFO", "WARNING"]; // sorted, like the Python message
 const AUDIO_BITRATE_DEFAULT_KBPS: u64 = 128;
+const DEFAULT_PROFILE_MANIFEST: &str = "manifests/verified-profiles.json";
 
 macro_rules! str_enum {
     ($(#[$m:meta])* $name:ident { $($var:ident => $s:literal),+ $(,)? }) => {
@@ -1095,7 +1096,11 @@ fn build(raw: Option<&Yaml>, errors: &Errors, warnings: &mut Vec<String>) -> Opt
             r.uint("video_bitrate_kbps", 1, false)
         },
         audio_bitrate_kbps: r.uint("audio_bitrate_kbps", 1, false),
-        approved_profile_manifest: r.str_("approved_profile_manifest", None),
+        approved_profile_manifest: if r.has("approved_profile_manifest") {
+            r.str_("approved_profile_manifest", None)
+        } else {
+            DEFAULT_PROFILE_MANIFEST.to_string()
+        },
     };
     r.finish();
 
@@ -1425,24 +1430,8 @@ pub fn apply_account_ids(
     })
 }
 
-fn json_matches_id(v: Option<&Value>, want: &str) -> bool {
-    match v {
-        Some(Value::String(s)) => s == want,
-        Some(Value::Number(n)) => n.to_string() == want,
-        _ => false,
-    }
-}
-
-fn json_matches_number(v: Option<&Value>, want: u64) -> bool {
-    matches!(v, Some(Value::Number(n)) if n.as_f64() == Some(want as f64))
-}
-
 /// Return reasons the service must not run yet; an empty list means it may.
-pub fn check_operable(
-    cfg: &RelayConfig,
-    capability_manifest: &Value,
-    profile_manifest: &Value,
-) -> Vec<String> {
+pub fn check_operable(cfg: &RelayConfig, capability_manifest: &Value) -> Vec<String> {
     let mut errors = Vec::new();
     if cfg.liveness.source_dead_timeout_seconds.is_none() {
         errors.push(
@@ -1467,31 +1456,6 @@ pub fn check_operable(
     if cfg.codecs.audio_mode == AudioMode::Transcode {
         errors.push("codecs.audio_mode: transcode not supported in this build".to_string());
     }
-
-    if cfg.discord.expected_relay_user_id == 0 {
-        return errors; // the profile is approved per ingest account; checked once its ID is resolved
-    }
-    let (w, h, fps) = cfg.profile_key();
-    let relay_id = cfg.discord.expected_relay_user_id.to_string();
-    let guild_id = cfg.discord.guild_id.to_string();
-    let listed = profile_manifest
-        .get("profiles")
-        .and_then(Value::as_array)
-        .is_some_and(|profiles| {
-            profiles.iter().any(|p| {
-                p.is_object()
-                    && json_matches_id(p.get("relay_user_id"), &relay_id)
-                    && json_matches_id(p.get("guild_id"), &guild_id)
-                    && json_matches_number(p.get("width"), w)
-                    && json_matches_number(p.get("height"), h)
-                    && json_matches_number(p.get("fps"), fps)
-            })
-        });
-    if !listed {
-        errors.push(format!(
-            "profile {w}x{h}@{fps} not approved for relay {relay_id} in guild {guild_id}"
-        ));
-    }
     errors
 }
 
@@ -1515,6 +1479,12 @@ pub fn ignored_setting_notes(cfg: &RelayConfig) -> Vec<String> {
         notes.push(format!(
             "note: quality.audio_bitrate_kbps {} is ignored (Opus is forwarded as received, never re-encoded)",
             cfg.quality.audio_bitrate_kbps
+        ));
+    }
+    if cfg.quality.approved_profile_manifest != DEFAULT_PROFILE_MANIFEST {
+        notes.push(format!(
+            "note: quality.approved_profile_manifest {} is ignored (no profile approval gate in this build)",
+            cfg.quality.approved_profile_manifest
         ));
     }
     let c = &cfg.codecs;

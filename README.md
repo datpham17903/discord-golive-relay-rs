@@ -127,7 +127,6 @@ relayctl validate --config config.yaml
 | `quality.mode` | `auto` (a source up to `max_*` is passed through unchanged) or `fixed` | `auto` | rarely |
 | `quality.max_width/height/fps` | Output cap in `auto` mode (width and height must be even). A larger source is not relayed | 2560 x 1440 @ 60 | lower it to refuse heavy sources |
 | `quality.fixed_width/height/fps` | Expected size in `fixed` mode | 1920 x 1080 @ 60 | only with `fixed` |
-| `quality.approved_profile_manifest` | Approved profiles file | `manifests/verified-profiles.json` | different location |
 | `audio.enabled` | Relay the stream audio | `true` | set `false` for video only |
 | `runtime.start_debounce_ms` | Wait before reacting to a start | `100` | `0`-`100` when viewers race for the 50 slots of the target's Go Live |
 | `runtime.self_deaf_ingest`, `self_deaf_outputs` | Accounts join voice self-muted and self-deafened | `true` | only if the stream audio goes missing |
@@ -185,29 +184,6 @@ More people start relays at once. An extra relay keeps publishing while anyone w
 
 With `codecs.output_codec: adaptive` (the default) every output forwards the target's video unchanged in ONE common codec: the highest of AV1 > H265 > H264 > VP8 > VP9 that the target produces and that every viewer of every output decodes. When a weaker viewer joins, the whole chain drops to a codec that viewer decodes and rises again after that viewer leaves. `!relay status` shows the current codec. Set `output_codec: H264` for the fixed H.264 mode.
 
-### Approved profile manifest
-
-The service only runs a quality profile that was verified live on that exact relay account and server. Copy `manifests/verified-profiles.example.json` to `manifests/verified-profiles.json` (gitignored; it holds your IDs) and edit it:
-
-```json
-{
-  "schema_version": 1,
-  "profiles": [
-    {
-      "relay_user_id": "YOUR_INGEST_ACCOUNT_ID",
-      "guild_id": "YOUR_GUILD_ID",
-      "width": 1920,
-      "height": 1080,
-      "fps": 60,
-      "verified_on": "2026-11-01",
-      "evidence": "viewer saw 1080P 60FPS and smooth video"
-    }
-  ]
-}
-```
-
-`width`, `height` and `fps` must equal `max_*` (auto) or `fixed_*` (fixed). Add the entry after the profile played well in a live run.
-
 ## 6. First-time validation
 
 The relay refuses to run while `liveness.source_dead_timeout_seconds` is `null`. Measure it once: let the target share a static screen for at least 10 minutes while the receive-only probe watches it, then calibrate `T_dead` from the probe's JSON log:
@@ -240,7 +216,7 @@ relayctl run      --config config.yaml
 
 | Command | What it does |
 | --- | --- |
-| `relayctl validate --config FILE` | Checks the config and approved profile. No Discord connection. Prints `config valid`, then one `not operable: ...` line per reason the service would refuse to run (null `T_dead`, profile not approved). Exit 1 on an invalid config. |
+| `relayctl validate --config FILE` | Checks the config. No Discord connection. Prints `config valid`, then one `not operable: ...` line per reason the service would refuse to run (null `T_dead`). Exit 1 on an invalid config. |
 | `relayctl doctor --config FILE` | Checks the config, state directory and capability manifest. Never publishes. No encoder or decoder probes. Exit 1 if any check fails. |
 | `relayctl run --config FILE [--metrics-listen IP:PORT]` | Runs the service. Exit 78 means a config or credential problem (no automatic restart under systemd). Starts disabled on first run. `--metrics-listen`: see Monitoring below. |
 | `relayctl status [--state-dir DIR]` | Shows state, enabled flag, FATAL, quarantine, profile. Asks the running service, else reads `status.json` or `state.json`. |
@@ -301,7 +277,7 @@ install -m 0755 relayctl /opt/discord-relay/relayctl
 
 install -d -m 0750 -o root -g discord-relay /etc/discord-relay /etc/discord-relay/manifests
 install -m 0640 -g discord-relay config.yaml /etc/discord-relay/config.yaml
-install -m 0640 -g discord-relay manifests/verified-capabilities.json manifests/verified-profiles.json /etc/discord-relay/manifests/
+install -m 0640 -g discord-relay manifests/verified-capabilities.json /etc/discord-relay/manifests/
 install -m 0600 secrets/relay-token   /etc/discord-relay/token
 install -m 0600 secrets/relay-token-2 /etc/discord-relay/token-2
 ```
@@ -360,7 +336,6 @@ After fixing the cause: `relayctl reset-fatal --state-dir DIR` (add `--account I
 | `video_mode` / `audio_mode` set to `transcode` | Not supported in this build; use `passthrough` |
 | `recording_enabled: must be false (not implemented)` | Leave it `false` (same for `include_media`) |
 | `not operable: liveness.source_dead_timeout_seconds ...` | Calibrate `T_dead` (section 6) |
-| `not operable: profile ... not approved` | Add the profile to `verified-profiles.json` (section 5) |
 | `no credential: ...` | Set `RELAY_TOKEN_DIR` (or systemd `LoadCredential`); file name must equal the credential name |
 
 ## 10. What is verified live
@@ -376,8 +351,7 @@ crates/relay-discord/     Discord gateway adapter
 crates/relay-voice/       voice connection
 crates/relay-media/       passthrough media pipeline
 crates/relayctl/          the relayctl binary (service wiring, CLI)
-manifests/                verified-capabilities.json (live results, T_dead), build-manifest.json,
-                          verified-profiles.example.json
+manifests/                verified-capabilities.json (live results, T_dead), build-manifest.json
 deploy/systemd/           discord-relay.service
 tools/                    fixture generators
 .github/workflows/        CI (fmt, clippy, test on three OS) and tagged releases

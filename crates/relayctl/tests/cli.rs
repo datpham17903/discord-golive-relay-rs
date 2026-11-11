@@ -426,26 +426,13 @@ fn base_config(state_dir: &Path) -> String {
         )
 }
 
-/// Manifests next to the config that make it operable for the ingest account `relay_id`
-/// (stands in for the monkeypatched `_operable_errors`).
-fn write_manifests(cfg_path: &Path, relay_id: u64) {
-    let cfg = load_config(cfg_path).unwrap();
-    let (w, h, fps) = cfg.profile_key();
+/// Capability manifest next to the config that makes it operable.
+fn write_manifests(cfg_path: &Path) {
     let dir = cfg_path.parent().unwrap().join("manifests");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("verified-capabilities.json"),
         json!({"live": {"source_dead_timeout_seconds": 30}}).to_string(),
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("verified-profiles.json"),
-        json!({"profiles": [{
-            "relay_user_id": relay_id.to_string(),
-            "guild_id": "100000000000000002",
-            "width": w, "height": h, "fps": fps,
-        }]})
-        .to_string(),
     )
     .unwrap();
 }
@@ -459,7 +446,7 @@ fn run_corrupt_state_exits_78() {
     );
     let cfg = tmp.path().join("c.yaml");
     std::fs::write(&cfg, text).unwrap();
-    write_manifests(&cfg, 100000000000000001);
+    write_manifests(&cfg);
     std::fs::write(tmp.path().join("state.json"), "{not json").unwrap();
     let h = Harness::new().token_dir(tmp.path(), &["relay-token"]);
     assert_eq!(h.main(&["run", "--config", s(&cfg)]).code, EXIT_CONFIG);
@@ -591,7 +578,7 @@ fn run_resolves_ids_before_locks() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = default_short_form(tmp.path());
     // Approved only for the resolved ingest id: the operable check must see 11.
-    write_manifests(&cfg, 11);
+    write_manifests(&cfg);
     let mut h = Harness::new()
         .token_dir(tmp.path(), ALL_TOKENS)
         .with_ids(IDS);
@@ -644,7 +631,7 @@ fn run_explicit_ids_need_no_lookup() {
         1,
     );
     std::fs::write(&cfg, text).unwrap();
-    write_manifests(&cfg, 20);
+    write_manifests(&cfg);
     let mut h = Harness::new().token_dir(tmp.path(), ALL_TOKENS);
     let locked = recording_service(&mut h);
     let r = h.main(&["run", "--config", s(&cfg)]);
@@ -665,7 +652,7 @@ fn metrics_recorder(h: &mut Harness) -> Arc<Mutex<Vec<Option<SocketAddr>>>> {
 
 fn runnable(tmp: &Path) -> (PathBuf, Harness) {
     let cfg = default_short_form(tmp);
-    write_manifests(&cfg, 11);
+    write_manifests(&cfg);
     let h = Harness::new().token_dir(tmp, ALL_TOKENS).with_ids(IDS);
     (cfg, h)
 }
@@ -848,7 +835,7 @@ fn doctor_checks_passthrough_build() {
         .replace("video_mode: passthrough", "video_mode: transcode");
     let cfg = tmp.path().join("c.yaml");
     std::fs::write(&cfg, text).unwrap();
-    write_manifests(&cfg, 100000000000000001);
+    write_manifests(&cfg);
     let r = Harness::new().main(&["doctor", "--config", s(&cfg)]);
     for needle in [
         "[ok] voice crate: relay-voice",

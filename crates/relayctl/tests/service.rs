@@ -3216,20 +3216,22 @@ service_test!(test_service_hold_debounced, async {
     let env = env(adaptive(Setup::default()));
     let task = env.reach_relaying().await;
     wait_until(|| env.svc.with_codec(|c| c.effective() == Some("H265"))).await;
+    // The service's own ticker re-evaluates the hold on the real clock, so each check is a tick at a
+    // chosen time whose result is read under the same lock (the hold starts within [held_at, now]).
+    let held_at = monotonic();
     env.svc.execute(vec![Action::ShowSlate {
         generation: env.svc.current_ids().0,
         reason: HoldReason::NoMedia,
     }]);
-    // a short stall changes nothing
+    // a short stall changes nothing: at most 1 s of hold by then
     assert_eq!(
-        env.svc.with_codec(|c| c.effective().map(str::to_owned)),
+        env.svc.codec_event_hook(CodecEvent::Tick, held_at + 1.0),
         Some("H265".into())
     );
     // Python moves `held_since` back 3 s; the same as a tick 3 s later
-    env.svc
-        .codec_event_hook(CodecEvent::Tick, monotonic() + 3.0);
     assert_eq!(
-        env.svc.with_codec(|c| c.effective().map(str::to_owned)),
+        env.svc
+            .codec_event_hook(CodecEvent::Tick, monotonic() + 3.0),
         Some("H264".into())
     );
     assert_eq!(env.shutdown(task).await, 0);

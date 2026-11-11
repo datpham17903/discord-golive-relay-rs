@@ -4067,10 +4067,13 @@ impl Service {
         self.hot.lock().last_idr_req = t;
     }
 
+    /// The effective codec right after the event, read under the same lock: the service's own
+    /// `Tick` (real clock) may change it again at any time.
     #[doc(hidden)]
-    pub fn codec_event_hook(&self, ev: CodecEvent, now: f64) {
+    pub fn codec_event_hook(&self, ev: CodecEvent, now: f64) -> Option<String> {
         let mut c = self.core.lock();
         self.codec_event_at(&mut c, ev, now);
+        c.codec_ctl.effective().map(str::to_owned)
     }
 
     #[doc(hidden)]

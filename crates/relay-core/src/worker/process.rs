@@ -24,6 +24,7 @@ use serde_json::{Map, Value, json};
 
 use crate::clock::monotonic;
 use crate::config::{CodecMode, OutputProfile, QualityMode};
+use crate::publisher::CATCHUP_FACTOR;
 use crate::worker::ipc::BoundedChannel;
 use crate::worker::messages::{
     AUDIO_FRAME_BYTES, Egress, EgressAudio, EgressVideo, Ingress, IngressAudio, IngressVideo,
@@ -46,8 +47,9 @@ pub const ADAPT_PERCENTILE: f64 = 1.0;
 pub const ADAPT_MAX_S: f64 = 0.6;
 /// Per-frame step towards a lower target (fast attack, slow release).
 pub const ADAPT_RELEASE: f64 = 0.002;
-/// 600 ms at 60 fps plus margin.
-pub const JITTER_MAX_FRAMES: usize = 48;
+/// 2 s at 60 fps (Python: 48). A source that stalls longer than the 600 ms cap delivers the whole stall
+/// in one burst; 48 turned a 0.8 s stall into a resync and a keyframe wait (live: 245 skips / 90 s).
+pub const JITTER_MAX_FRAMES: usize = 120;
 /// `need_keyframe` is repeated at this rate while still waiting.
 pub const KEYFRAME_REREQUEST_S: f64 = 1.0;
 pub const STATS_INTERVAL_S: f64 = 5.0;
@@ -175,6 +177,8 @@ pub struct Worker {
     pub offsets: VecDeque<(f64, f64)>,
     pub lateness: VecDeque<(f64, f64)>,
     jbuf_ssrc: Option<u32>,
+    /// An overdue access unit is not forwarded before this time.
+    paced_until: f64,
     announce_fresh: bool,
     last_audio_deadline: f64,
     // Audio is timed by local arrival like video, never by the sender's clock (RTCP / abs-send-time:
@@ -218,6 +222,7 @@ impl Worker {
             offsets: VecDeque::new(),
             lateness: VecDeque::new(),
             jbuf_ssrc: None,
+            paced_until: f64::NEG_INFINITY,
             announce_fresh: false,
             last_audio_deadline: f64::NEG_INFINITY,
             audio_unwrappers: HashMap::new(),
@@ -252,6 +257,7 @@ impl Worker {
         self.offsets.clear();
         self.lateness.clear();
         self.jbuf_ssrc = None;
+        self.paced_until = f64::NEG_INFINITY;
         self.announce_fresh = false;
         self.last_audio_deadline = f64::NEG_INFINITY;
         self.audio_unwrappers.clear();
@@ -587,7 +593,18 @@ impl Worker {
         }
         // A full egress only means the main process has not polled yet: the AU waits in jbuf
         // (dropping it would freeze viewers until the next source IDR, ~0.7 s live).
-        if !self.jbuf.front().is_some_and(|e| e.present_at <= now) || self.egress.full("video") {
+        let Some(front) = self.jbuf.front() else {
+            return;
+        };
+        if front.present_at > now || self.egress.full("video") {
+            return;
+        }
+        // A stall longer than the jitter cap leaves part of its burst overdue. It goes out at the
+        // publisher's catch-up pace: all at once it would overflow the publisher's queue
+        // (MAX_EGRESS_AUS) and late limit, which drop to the next source IDR.
+        let fps = self.profile.as_ref().map_or(30, |p| p.fps).max(1);
+        let overdue = front.present_at < now - 1.0 / fps as f64;
+        if overdue && now < self.paced_until {
             return;
         }
         let entry = self.jbuf.pop_front().expect("checked above");
@@ -598,10 +615,11 @@ impl Worker {
             h264_is_idr(&entry.au)
         };
         let size = entry.au.len();
+        let frame_time_ms = self.frame_time_ms(entry.rtp_s);
         let item = EgressVideo {
             generation: self.generation,
             epoch: self.epoch,
-            frame_time_ms: self.frame_time_ms(entry.rtp_s),
+            frame_time_ms,
             deadline: now,
             source_frame_at: Some(entry.mono_received),
             repeated: false,
@@ -617,6 +635,11 @@ impl Worker {
             self.stats.frames_out += 1;
             self.stats.passthrough_frames += 1;
             self.stats.idr += u64::from(idr);
+            if overdue {
+                // from the previous slot, not from `now`: a late tick must not slow the catch-up
+                let step = frame_time_ms / 1000.0 * CATCHUP_FACTOR;
+                self.paced_until = self.paced_until.max(now - step) + step;
+            }
         } else {
             self.stats.egress_dropped += 1;
             self.pt_resync(now);

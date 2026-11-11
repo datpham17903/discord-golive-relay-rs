@@ -20,8 +20,8 @@ use relay_core::worker::messages::{
     StopWorker, WorkerEvent, WorkerEventKind,
 };
 use relay_core::worker::process::{
-    ADAPT_MAX_S, ADAPT_RELEASE, ADAPT_WINDOW_S, Worker, WorkerHandle, egress_channel,
-    events_channel, h264_is_idr, ingress_channel,
+    ADAPT_MAX_S, ADAPT_RELEASE, ADAPT_WINDOW_S, JITTER_MAX_FRAMES, Worker, WorkerHandle,
+    egress_channel, events_channel, h264_is_idr, ingress_channel,
 };
 use relay_media::h264::{ensure_low_delay_vui, nal_units};
 use serde_json::{Value, json};
@@ -396,13 +396,14 @@ fn test_passthrough_oversized_idr_falls_back_to_transcode_and_returns() {
 #[test]
 fn test_passthrough_jbuf_overflow_clears_and_requests_keyframe() {
     let idr = idr240();
-    let aus = h264_stream(&idr, 60);
+    let aus = h264_stream(&idr, JITTER_MAX_FRAMES + 7);
     let mut r = make_worker(profile());
-    for (i, au) in aus[..55].iter().enumerate() {
+    for (i, au) in aus.iter().enumerate() {
         r.handle(vmsg(1, 0, "H264", 1, (i * 3000) as u32, T0, au.clone()), T0); // never ticked
     }
     assert!(r.w.jbuf.is_empty() && r.w.need_key && !r.events(NeedKeyframe).is_empty());
-    r.handle(vmsg(1, 0, "H264", 1, 60 * 3000, T0, idr), T0);
+    let rtp = ((JITTER_MAX_FRAMES + 7) * 3000) as u32;
+    r.handle(vmsg(1, 0, "H264", 1, rtp, T0, idr), T0);
     assert!(!r.w.need_key && r.w.jbuf.len() == 1);
 }
 
@@ -1484,4 +1485,109 @@ fn bursty_52_to_69_fps_source_through_real_egress_is_not_skipped() {
         s
     );
     assert_eq!(out, n);
+}
+
+/// A source that stalls 850 ms (longer than the 600 ms jitter cap) every 10 s and then delivers the
+/// stall at once: the whole burst stays in the jitter buffer (no resync), and the overdue part leaves at
+/// the publisher's catch-up pace, so the real publisher (8 AUs, 200 ms late limit) never drops to an
+/// IDR and the latency returns to the jitter buffer after each stall. Worker woken by arrivals or by its
+/// receive timeout (5 ms, or 15.6 ms as on Windows), pump every 10 ms, sender paced by the publisher.
+#[test]
+fn stall_of_850ms_through_real_egress_and_publisher_is_not_skipped() {
+    use parking_lot::Mutex;
+    use relay_core::publisher::Publisher;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const SOURCE_FPS: f64 = 60.0;
+    const STALL_S: f64 = 0.85;
+    let n = 60 * 60;
+    let aus = h264_stream(&idr720(), n);
+    let mut arrivals = Vec::with_capacity(n);
+    for i in 0..n {
+        let produced = T0 + i as f64 / SOURCE_FPS;
+        let stall_start = T0 + (i as f64 / SOURCE_FPS / 10.0).floor() * 10.0 + 5.0;
+        let held = produced >= stall_start && produced < stall_start + STALL_S;
+        arrivals.push(if held {
+            stall_start + STALL_S
+        } else {
+            produced
+        });
+    }
+    for wake_s in [0.005, 0.0156] {
+        let mut r = rig_with(
+            OutputProfile {
+                fps: 60,
+                ..profile()
+            },
+            Arc::new(egress_channel()),
+        );
+        let clock = Arc::new(Mutex::new(T0));
+        let idr_requests = Arc::new(AtomicUsize::new(0));
+        let (c, q) = (clock.clone(), idr_requests.clone());
+        let publisher = Publisher::new(
+            Box::new(|_, _, _| true),
+            Box::new(move || *c.lock()),
+            0.2, // the service's MAX_LATE_S
+            Box::new(move || {
+                q.fetch_add(1, Ordering::SeqCst);
+            }),
+            "H264",
+        );
+        publisher.set_source(1, 0);
+        let (mut next, mut now, mut last_wake, mut next_pump, mut next_send) = (0, T0, T0, T0, T0);
+        let mut latency = Vec::with_capacity(n);
+        let end = arrivals[n - 1] + 3.0;
+        while now < end {
+            now += 0.001;
+            *clock.lock() = now;
+            let mut woke = false;
+            while next < n && arrivals[next] <= now {
+                let rtp = (next * 1500) as u32;
+                let msg = vmsg(1, 0, "H264", 1, rtp, arrivals[next], aus[next].clone());
+                r.handle(msg, now);
+                next += 1;
+                woke = true;
+            }
+            if woke || now - last_wake >= wake_s {
+                r.w.tick(now);
+                last_wake = now;
+            }
+            if now >= next_pump {
+                for _ in 0..16 {
+                    match r.egress.get_nowait() {
+                        Ok(Egress::Video(v)) => publisher.offer_video(v),
+                        Ok(Egress::Audio(_)) => {}
+                        Err(_) => break,
+                    }
+                }
+                next_pump = now + 0.01;
+            }
+            if now >= next_send {
+                // relay-voice `next_video_time`, retrying every 2 ms while nothing is due
+                next_send = match publisher.next_video() {
+                    Some(f) => {
+                        latency.push(now - (T0 + latency.len() as f64 / SOURCE_FPS));
+                        let ft = f.frame_time_ms / 1000.0;
+                        let target = next_send + ft;
+                        if now - target > ft { now } else { target }
+                    }
+                    None => now + 0.002,
+                };
+            }
+        }
+        let s = &r.w.stats;
+        assert_eq!(
+            (s.backpressure_skips, s.egress_dropped, s.ingress_dropped),
+            (0, 0, 0),
+            "wake {wake_s}: {s:?}"
+        );
+        assert_eq!(idr_requests.load(Ordering::SeqCst), 0, "wake {wake_s}");
+        assert_eq!(latency.len(), n, "wake {wake_s}");
+        // after each stall's catch-up the delay is back at the 600 ms cap (plus pump and send slots)
+        for stall in 1..6 {
+            let before_next = (stall * 10 + 5) * 60 - 1;
+            let l = latency[before_next];
+            assert!(l < ADAPT_MAX_S + 0.05, "wake {wake_s}, stall {stall}: {l}");
+        }
+    }
 }

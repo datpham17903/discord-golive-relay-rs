@@ -211,6 +211,8 @@ struct Harness {
     ws: VoiceWs,
     events: UnboundedReceiver<VoiceEvent>,
     dave: Arc<Dave>,
+    /// Still listening, for the socket of a resume.
+    listener: TcpListener,
 }
 
 async fn start(tweak: impl FnOnce(&mut VoiceWsConfig)) -> Harness {
@@ -231,6 +233,7 @@ async fn start(tweak: impl FnOnce(&mut VoiceWsConfig)) -> Harness {
         ws,
         events,
         dave,
+        listener,
     }
 }
 
@@ -556,6 +559,93 @@ async fn resume_sends_op7_with_the_previous_seq_ack() {
         events_until(&mut h.events, |e| matches!(e, VoiceEvent::Resumed)).await,
         VoiceEvent::Resumed
     );
+}
+
+fn resumed_or_closed(e: &VoiceEvent) -> bool {
+    matches!(e, VoiceEvent::Resumed | VoiceEvent::Closed { .. })
+}
+
+#[tokio::test]
+async fn resumable_close_reconnects_with_resume_and_carries_on() {
+    for drop_kind in ["close 4015", "no close frame"] {
+        let mut h = start(|c| c.resume_on_drop = true).await;
+        let identify = h.server.recv_json().await;
+        assert_eq!(identify["op"], 0);
+        h.server.hello(60_000).await;
+        h.server
+            .send(json!({"op": 15, "d": {"any": 100}, "seq": 9}))
+            .await;
+        events_until(&mut h.events, |e| matches!(e, VoiceEvent::Message { .. })).await;
+        if drop_kind == "close 4015" {
+            h.server.close(4015).await;
+        }
+        drop(h.server);
+
+        // a new socket on the same URL, RESUME with the same session and token
+        let mut server = Server::accept(&h.listener).await;
+        assert_eq!(server.uri, "/?v=9", "{drop_kind}");
+        assert_eq!(
+            server.recv_json().await,
+            json!({"op": 7, "d": {
+                "token": FAKE_TOKEN,
+                "server_id": "111",
+                "channel_id": "222",
+                "session_id": "session-1",
+                "seq_ack": 9,
+            }}),
+            "{drop_kind}"
+        );
+        server.hello(40).await;
+        server.send(json!({"op": 9, "d": null})).await;
+        assert_eq!(
+            events_until(&mut h.events, resumed_or_closed).await,
+            VoiceEvent::Resumed,
+            "{drop_kind}"
+        );
+        // the handle keeps working, heartbeats run on the new socket
+        h.ws.speak(speaking::SOUNDSHARE, 0).unwrap();
+        assert_eq!(server.recv_json().await["op"], 5, "{drop_kind}");
+        let deadline = Instant::now() + WAIT;
+        while server.beats.is_empty() {
+            assert!(Instant::now() < deadline, "no heartbeat after the resume");
+            let _ = timeout(Duration::from_millis(50), server.recv_opt()).await;
+        }
+        assert_eq!(server.beats[0], 9);
+    }
+}
+
+#[tokio::test]
+async fn other_close_codes_are_not_resumed() {
+    for code in [4006u16, 4014, 1000] {
+        let mut h = start(|c| c.resume_on_drop = true).await;
+        let _identify = h.server.recv_json().await;
+        h.server.close(code).await;
+        let VoiceEvent::Closed { code: got, .. } =
+            events_until(&mut h.events, resumed_or_closed).await
+        else {
+            panic!("{code} was resumed");
+        };
+        assert_eq!(got, Some(code));
+    }
+}
+
+#[tokio::test]
+async fn resume_gives_up_when_the_server_is_gone() {
+    let mut h = start(|c| {
+        c.resume_on_drop = true;
+        c.connect_timeout = Duration::from_millis(500);
+    })
+    .await;
+    let _identify = h.server.recv_json().await;
+    drop(h.listener);
+    h.server.close(4015).await;
+    let VoiceEvent::Closed { code, reason } = events_until(&mut h.events, resumed_or_closed).await
+    else {
+        panic!("resumed without a server");
+    };
+    assert_eq!(code, Some(4015));
+    assert!(reason.contains("resume failed"), "{reason}");
+    assert!(h.ws.send_json(op::SPEAKING, json!({})).is_err());
 }
 
 #[tokio::test]

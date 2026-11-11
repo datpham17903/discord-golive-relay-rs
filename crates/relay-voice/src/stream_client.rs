@@ -8,6 +8,11 @@
 //! stream is `rtc_server_id - 1`. Creating a stream is the same with STREAM_CREATE (op 18) as the
 //! request and our own stream key; the owner then sends media through [`StreamClient::play`] (see
 //! the `publish` module).
+//!
+//! A stream recovers like the voice connection (see the `voice_client` module). When our own stream
+//! moves to another server (`StreamConnectionState.stream_server_update`) the new connection keeps
+//! the DAVE session, no second op 18 goes out, and the sender carries on with the same source on the
+//! new connection.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -18,7 +23,8 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use crate::connection::{
-    ConnEvent, MediaCallback, RtcConnection, RtcSettings, RtcTarget, media_callback,
+    AfterClose, ConnEvent, MediaCallback, RECONNECT_ATTEMPTS, RECONNECT_TIMEOUT, RtcConnection,
+    RtcSettings, RtcTarget, after_close, connect_with_retries, media_callback,
 };
 use crate::dave::Dave;
 use crate::error::VoiceError;
@@ -81,8 +87,13 @@ struct StreamState {
     callback: Option<MediaCallback>,
     rtc_server_id: u64,
     rtc_channel_id: u64,
-    /// `(endpoint, token)` the live connection uses.
+    /// `(endpoint, token)` the live connection uses, or the one being reconnected to; `None` while
+    /// a forced close waits for a server.
     connected_server: Option<(String, String)>,
+    /// The connection was dropped to be replaced (server moved, forced close, `reconnect`).
+    reconnecting: bool,
+    /// DAVE state of the connection, kept across reconnects.
+    dave: Option<Arc<Dave>>,
     ended: bool,
     /// Set by [`StreamClient::play`]; only a stream we own has one.
     sender: Option<Arc<Sender>>,
@@ -156,6 +167,8 @@ impl StreamInner {
                 rtc_server_id: info.rtc_server_id,
                 rtc_channel_id: info.rtc_channel_id,
                 connected_server: None,
+                reconnecting: false,
+                dave: None,
                 ended: false,
                 sender: None,
                 pli: None,
@@ -241,6 +254,8 @@ impl StreamInner {
         let callback = {
             let mut st = self.state.lock();
             st.connected_server = Some(server);
+            st.reconnecting = false;
+            st.dave = Some(Arc::clone(conn.dave()));
             st.conn = Some(Arc::clone(&conn));
             st.callback.clone()
         };
@@ -271,18 +286,62 @@ impl StreamInner {
                     error,
                 }),
                 ConnEvent::Message { .. } => {}
+                ConnEvent::Resumed => vc.emit(ClientEvent::Reconnected {
+                    stream_key: stream_key.clone(),
+                }),
                 ConnEvent::Closed { code, reason } => {
-                    // Python's poll loop ends in `disconnect()`, which also tells the gateway.
-                    self.teardown(true).await;
-                    vc.emit(ClientEvent::Disconnected {
-                        stream_key,
-                        code,
-                        reason,
-                    });
+                    match after_close(code, self.settings.reconnect) {
+                        AfterClose::GiveUp => {
+                            // Python's poll loop ends in `disconnect()`, which also tells the gateway.
+                            self.teardown(true).await;
+                            vc.emit(ClientEvent::Disconnected {
+                                stream_key,
+                                code,
+                                reason,
+                            });
+                        }
+                        AfterClose::AwaitServer => self.await_server(generation, code, reason),
+                        AfterClose::Reconnect => {
+                            tokio::spawn(Arc::clone(&self).migrate(RECONNECT_ATTEMPTS));
+                        }
+                    }
                     return;
                 }
             }
         }
+    }
+
+    /// `_potential_reconnect` after a 4014 / 4022 close: the next STREAM_SERVER_UPDATE reconnects;
+    /// without one within [`RECONNECT_TIMEOUT`] the stream is torn down (STREAM_DELETE meanwhile
+    /// ends it at once).
+    fn await_server(self: &Arc<Self>, generation: u64, code: Option<u16>, reason: String) {
+        let conn = {
+            let mut st = self.state.lock();
+            if st.ended || self.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            st.reconnecting = true;
+            st.connected_server = None;
+            st.conn.take()
+        };
+        if let Some(conn) = conn {
+            conn.close(1000);
+        }
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(RECONNECT_TIMEOUT).await;
+            if this.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            this.teardown(true).await;
+            if let Some(vc) = this.vc.upgrade() {
+                vc.emit(ClientEvent::Disconnected {
+                    stream_key: Some(this.key.clone()),
+                    code,
+                    reason,
+                });
+            }
+        });
     }
 
     /// Drops the connection and unregisters the stream; `delete` also sends STREAM_DELETE (op 19).
@@ -315,7 +374,7 @@ impl StreamInner {
 
     /// STREAM_SERVER_UPDATE for a connected stream: move to the new server if it differs from the
     /// one in use (the Python client reconnects on every one; a repeated identical update only
-    /// churns the connection).
+    /// churns the connection). A stream waiting after a forced close reconnects on any.
     fn on_server_update(self: &Arc<Self>) {
         let Some(vc) = self.vc.upgrade() else { return };
         let Some(server) = vc.stream_server(&self.key) else {
@@ -323,7 +382,7 @@ impl StreamInner {
         };
         {
             let mut st = self.state.lock();
-            if st.ended || st.conn.is_none() {
+            if st.ended || (st.conn.is_none() && !st.reconnecting) {
                 return;
             }
             match st.connected_server.as_ref() {
@@ -331,7 +390,7 @@ impl StreamInner {
                     if token == server.token.expose() {
                         return;
                     }
-                    if self.own {
+                    if self.own && !st.reconnecting {
                         // Same server, fresh token: the live connection stays valid, so keep it
                         // and only remember the token (the owner never reconnects with it).
                         st.connected_server =
@@ -346,44 +405,37 @@ impl StreamInner {
                 _ => {}
             }
         }
-        if self.own {
-            // Our stream moved to another server. Python (`StreamConnectionState.stream_server_update`)
-            // reconnects keeping the DAVE session and goes on playing; here the send pipeline is bound
-            // to the old connection (its SSRCs, RTX cache and nonce counter) and cannot be rebound
-            // without a live test, so the stream is torn down and the owner starts a new one.
-            let this = Arc::clone(self);
-            tokio::spawn(async move {
-                this.teardown(true).await;
-                if let Some(vc) = this.vc.upgrade() {
-                    vc.emit(ClientEvent::Disconnected {
-                        stream_key: Some(this.key.clone()),
-                        code: None,
-                        reason: "stream server moved".into(),
-                    });
-                }
-            });
-            return;
-        }
-        tokio::spawn(Arc::clone(self).migrate());
+        tokio::spawn(Arc::clone(self).migrate(1));
     }
 
-    /// Close the old socket with 4014 and handshake against the new stream server, keeping the DAVE
-    /// state, the listener and the session.
-    async fn migrate(self: Arc<Self>) {
+    /// Closes the old socket with 4014 and handshakes (up to `attempts` times) against the stream
+    /// server the gateway named last, keeping the DAVE state, the listener, the session and, for our
+    /// own stream, the sender with its source. A newer migration or a teardown supersedes it.
+    async fn migrate(self: Arc<Self>, attempts: u32) {
         let Some(vc) = self.vc.upgrade() else { return };
         let (Some(server), Some(session_id)) = (vc.stream_server(&self.key), vc.session_id())
         else {
             return;
         };
-        let (old, rtc_server_id, rtc_channel_id) = {
+        let (generation, old, dave, rtc_server_id, rtc_channel_id) = {
             let mut st = self.state.lock();
-            (st.conn.take(), st.rtc_server_id, st.rtc_channel_id)
+            let (false, Some(dave)) = (st.ended, st.dave.clone()) else {
+                return;
+            };
+            let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            st.reconnecting = true;
+            st.connected_server = Some((server.endpoint.clone(), server.token.expose().to_owned()));
+            (
+                generation,
+                st.conn.take(),
+                dave,
+                st.rtc_server_id,
+                st.rtc_channel_id,
+            )
         };
-        let Some(old) = old else { return };
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        let dave = Arc::clone(old.dave());
-        old.close(4014);
-        drop(old);
+        if let Some(old) = old {
+            old.close(4014);
+        }
         let target = RtcTarget {
             endpoint: server.endpoint.clone(),
             server_id: rtc_server_id,
@@ -393,34 +445,69 @@ impl StreamInner {
             token: VoiceToken::new(server.token.expose()),
             dave_group_id: rtc_server_id.saturating_sub(1),
         };
-        match RtcConnection::connect(
+        let connected = connect_with_retries(
             &vc.cfg.http,
             &target,
             &self.settings,
-            dave,
-            Duration::from_secs(30),
+            &dave,
+            RECONNECT_TIMEOUT,
+            attempts,
         )
-        .await
-        {
+        .await;
+        let superseded =
+            || self.state.lock().ended || self.generation.load(Ordering::SeqCst) != generation;
+        let failure = match connected {
+            _ if superseded() => {
+                // a newer migration took over; a connection made here is dropped (and closed)
+                return;
+            }
             Ok((conn, events)) => {
                 self.install(
                     conn,
                     events,
                     (server.endpoint, server.token.expose().to_owned()),
                 );
-                vc.emit(ClientEvent::Reconnected {
-                    stream_key: Some(self.key.clone()),
-                });
+                match self.rebind_sender() {
+                    Ok(()) => {
+                        vc.emit(ClientEvent::Reconnected {
+                            stream_key: Some(self.key.clone()),
+                        });
+                        return;
+                    }
+                    Err(e) => e,
+                }
             }
-            Err(e) => {
-                self.teardown(true).await;
-                vc.emit(ClientEvent::Disconnected {
-                    stream_key: Some(self.key.clone()),
-                    code: None,
-                    reason: e.to_string(),
-                });
-            }
+            Err(e) => e,
+        };
+        self.teardown(true).await;
+        vc.emit(ClientEvent::Disconnected {
+            stream_key: Some(self.key.clone()),
+            code: None,
+            reason: failure.to_string(),
+        });
+    }
+
+    /// Moves the sender of our own stream (if any) to the live connection. When the server
+    /// negotiated another video codec the owner is told with a `SessionUpdate`, and swaps the
+    /// source for it (`swap_output_source`) the way it does after op 14.
+    fn rebind_sender(&self) -> Result<(), VoiceError> {
+        let (sender, conn) = {
+            let st = self.state.lock();
+            (st.sender.clone(), st.conn.clone())
+        };
+        let (Some(sender), Some(conn)) = (sender, conn) else {
+            return Ok(());
+        };
+        let info = conn.session_info();
+        if sender.rebind(conn)?
+            && let Some(vc) = self.vc.upgrade()
+        {
+            vc.emit(ClientEvent::SessionUpdate {
+                stream_key: Some(self.key.clone()),
+                info,
+            });
         }
+        Ok(())
     }
 }
 

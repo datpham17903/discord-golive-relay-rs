@@ -1232,28 +1232,94 @@ async fn test_own_stream_server_update_with_a_new_token_keeps_the_connection() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_own_stream_server_update_to_another_endpoint_tears_the_stream_down() {
+async fn test_own_stream_moves_to_another_server_and_keeps_playing() {
+    const MOVED_AUDIO_SSRC: u32 = OWN_AUDIO_SSRC + 100;
+    const MOVED_VIDEO_SSRC: u32 = VIDEO_SSRC + 100;
     let mut rig = rig(RtcCfg::stream("H264", None)).await;
+    let mut moved_cfg = RtcCfg::stream("H264", None);
+    moved_cfg.own_ssrc = MOVED_AUDIO_SSRC;
+    moved_cfg.streams = vec![json!({
+        "type": "screen", "rid": "100", "quality": 100, "active": false,
+        "ssrc": MOVED_VIDEO_SSRC, "rtx_ssrc": MOVED_VIDEO_SSRC + 1,
+    })];
+    let moved = start_rtc(moved_cfg).await;
     let stream = create(&rig).await;
+    let dave = Arc::clone(stream.connection().unwrap().dave());
     stream.play(h264_source(), params()).unwrap();
+    let mut tap = Tap::new(&rig.stream_rtc);
+    tap.wait("H264 frames", |w| {
+        frames_of(&video_packets(w, VIDEO_SSRC)).len() >= 2
+    })
+    .await;
+    let frames_before = stream.send_stats().video_frames;
 
+    // StreamConnectionState.stream_server_update: close with 4014, handshake with the new server
     rig.client.handle_event(LinkEvent::StreamServerUpdate {
         stream_key: own_key(),
-        token: Some(Secret::new("FAKE-stream-token")),
-        endpoint: Some("wss://other-server.invalid:443".into()),
+        token: Some(Secret::new("FAKE-stream-token-moved")),
+        endpoint: Some(format!("wss://{}", moved.endpoint)),
     });
-    let reason = loop {
+    loop {
         match timeout(WAIT, rig.events.recv()).await.unwrap().unwrap() {
-            ClientEvent::Disconnected {
-                stream_key: Some(_),
-                reason,
-                ..
-            } => break reason,
-            ClientEvent::StreamTokenRefreshed { .. } => panic!("kept the connection"),
+            ClientEvent::Reconnected { stream_key } => {
+                assert_eq!(stream_key, Some(own_key()));
+                break;
+            }
+            ClientEvent::Disconnected { reason, .. } => panic!("torn down: {reason}"),
             _ => {}
         }
-    };
-    assert_eq!(reason, "stream server moved");
+    }
+    let identify = moved.wait_message(0).await;
+    assert_eq!(identify["d"]["token"], "FAKE-stream-token-moved");
+    assert_eq!(identify["d"]["session_id"], "sess-1");
+    assert_eq!(identify["d"]["server_id"], RTC_SERVER.to_string());
+    assert!(stream.is_connected() && stream.is_playing());
+    assert_eq!(stream.own_ssrc().unwrap(), MOVED_AUDIO_SSRC);
+    assert!(
+        Arc::ptr_eq(stream.connection().unwrap().dave(), &dave),
+        "the DAVE session is kept"
+    );
+
+    // the same source goes on, on the new connection's SSRCs
+    let mut moved_tap = Tap::new(&moved);
+    moved_tap
+        .wait("frames and audio on the new server", |w| {
+            frames_of(&video_packets(w, MOVED_VIDEO_SSRC)).len() >= 2
+                && w.rtp.iter().any(|(_, p)| p.packet.ssrc == MOVED_AUDIO_SSRC)
+        })
+        .await;
+    assert!(stream.send_stats().video_frames > frames_before);
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let announced = moved.messages(12).iter().any(|m| {
+            m["d"]["video_ssrc"] == MOVED_VIDEO_SSRC && m["d"]["audio_ssrc"] == MOVED_AUDIO_SSRC
+        });
+        let speaking = moved
+            .messages(5)
+            .iter()
+            .any(|m| m["d"]["speaking"] == 2 && m["d"]["ssrc"] == MOVED_AUDIO_SSRC);
+        if announced && speaking {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "op 12 with the new SSRCs and SPEAKING on the new connection"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // no second op 18, and nothing deleted
+    let seen = rig.seen();
+    assert_eq!(
+        seen.iter()
+            .filter(|s| s.starts_with("stream_create:"))
+            .count(),
+        1,
+        "{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|s| s.starts_with("stream_delete:")),
+        "{seen:?}"
+    );
+    stream.disconnect().await;
     rig.wait_seen(&format!("stream_delete:{}", own_key())).await;
-    assert!(!stream.is_connected());
 }

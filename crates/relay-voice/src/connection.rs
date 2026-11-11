@@ -7,8 +7,10 @@
 //!
 //! The handshake is READY, UDP connect + IP discovery, SELECT_PROTOCOL, SESSION_DESCRIPTION. After it
 //! the connection announces itself the way the Python client does: an empty receiver report, UDP
-//! ping, and an empty VIDEO (op 12) so the server starts sending video. There is no automatic RESUME
-//! or reconnect: when the websocket ends the owner gets [`ConnEvent::Closed`] and decides.
+//! ping, and an empty VIDEO (op 12) so the server starts sending video. A websocket that drops the
+//! resumable way (4015, no close code) is resumed underneath, keeping UDP, keys and DAVE
+//! ([`ConnEvent::Resumed`]); when it ends for good the owner gets [`ConnEvent::Closed`] and decides
+//! about reconnecting.
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -74,6 +76,12 @@ pub struct RtcSettings {
     pub ping: (Duration, Duration, Duration),
     /// Video send pacing, used when the connection publishes.
     pub send: SendSettings,
+    /// Python's `reconnect`: when the websocket ended for good with anything but 1000 / 4021 (final)
+    /// or 4014 / 4022 (forced; reconnected when the gateway names a server, regardless), a failed
+    /// resume included (4015 / no close code are resumed regardless), handshake again with a fresh
+    /// IDENTIFY instead of giving up. The relay passes `reconnect=False` everywhere, hence the
+    /// default `false`.
+    pub reconnect: bool,
 }
 
 /// `video_packet_burst_size` / `video_packet_burst_interval` of the native voice client.
@@ -117,6 +125,7 @@ impl RtcSettings {
                 Duration::from_secs(5),
             ),
             send: SendSettings::default(),
+            reconnect: false,
         }
     }
 }
@@ -133,11 +142,69 @@ pub enum ConnEvent {
         data: Value,
     },
     DaveError(String),
+    /// The websocket dropped and was resumed (op 9 RESUMED); the connection carries on.
+    Resumed,
     /// The websocket ended; the connection is dead. `code` is the close code when there was one.
     Closed {
         code: Option<u16>,
         reason: String,
     },
+}
+
+/// `timeout` of a reconnect: how long a forced close waits for the gateway to name a server, the
+/// budget of a reconnect handshake, and how long a sender waits for a new connection.
+pub const RECONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Handshakes tried by a `reconnect` (`_inner_connect` tries 5 times).
+pub(crate) const RECONNECT_ATTEMPTS: u32 = 5;
+
+/// What `_poll_voice_ws` does once the websocket has ended for good with `code` (the resumable
+/// closes were already resumed, or given up on, by the connection).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AfterClose {
+    /// 1000 and 4021 (rate limited), and anything else without `reconnect`.
+    GiveUp,
+    /// 4014 / 4022: disconnected or moved by Discord; reconnect when the gateway names a server.
+    AwaitServer,
+    /// `reconnect`: handshake again.
+    Reconnect,
+}
+
+pub(crate) fn after_close(code: Option<u16>, reconnect: bool) -> AfterClose {
+    match code {
+        Some(4014 | 4022) => AfterClose::AwaitServer,
+        Some(1000 | 4021) => AfterClose::GiveUp,
+        _ if reconnect => AfterClose::Reconnect,
+        _ => AfterClose::GiveUp,
+    }
+}
+
+/// `_inner_connect`: up to `attempts` handshakes within `timeout`, pausing `1 + 2i` seconds after the
+/// i-th failure. The last error is returned.
+pub(crate) async fn connect_with_retries(
+    http: &wreq::Client,
+    target: &RtcTarget,
+    settings: &RtcSettings,
+    dave: &Arc<Dave>,
+    timeout: Duration,
+    attempts: u32,
+) -> Result<(RtcConnection, mpsc::UnboundedReceiver<ConnEvent>), VoiceError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut attempt = 0u32;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let error =
+            match RtcConnection::connect(http, target, settings, Arc::clone(dave), remaining).await
+            {
+                Ok(connected) => return Ok(connected),
+                Err(e) => e,
+            };
+        let pause = Duration::from_secs(1 + 2 * u64::from(attempt));
+        attempt += 1;
+        if attempt >= attempts || tokio::time::Instant::now() + pause >= deadline {
+            return Err(error);
+        }
+        tokio::time::sleep(pause).await;
+    }
 }
 
 #[derive(Default)]
@@ -208,6 +275,7 @@ impl RtcConnection {
         cfg.streams = settings.streams.clone();
         cfg.codecs = settings.receive.codecs.clone();
         cfg.connect_timeout = timeout;
+        cfg.resume_on_drop = true;
         let modes = cfg.supported_modes.clone();
 
         let (ws, mut events) = VoiceWs::connect(http, cfg, Arc::clone(&dave)).await?;
@@ -521,6 +589,7 @@ async fn pump(
                 ConnEvent::SessionUpdate(info)
             }
             VoiceEvent::DaveError(error) => ConnEvent::DaveError(error),
+            VoiceEvent::Resumed => ConnEvent::Resumed,
             VoiceEvent::Closed { code, reason } => {
                 shared.closed.store(true, Ordering::Relaxed);
                 let _ = tx.send(ConnEvent::Closed { code, reason });
@@ -529,7 +598,6 @@ async fn pump(
             // READY/SESSION_DESCRIPTION only happen during the handshake.
             VoiceEvent::Ready(_)
             | VoiceEvent::SessionDescription(_)
-            | VoiceEvent::Resumed
             | VoiceEvent::BackendVersion { .. } => continue,
         };
         if tx.send(forward).is_err() {

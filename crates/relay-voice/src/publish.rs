@@ -16,8 +16,10 @@
 //! - A DAVE encrypt error or a failed send drops that frame or packet and is counted
 //!   ([`SendStats`]); Python raised and stopped the player thread.
 //! - Only one (non-simulcast) stream is sent, so MEDIA_SINK_WANTS (op 15) is ignored.
-//! - The sender thread ends when the connection closes; Python's player waited for a reconnect,
-//!   which the relay (`reconnect=False`) never does.
+//! - When the connection closes the thread waits up to [`RECONNECT_TIMEOUT`] for a new one, like
+//!   `MediaPlayer` waits for a reconnect, then ends. The stream client hands it the new connection
+//!   (`Sender::rebind`), which restarts video on that connection's SSRC and codec like a source
+//!   swap; Python's player kept the old video state.
 //! - The audio RTP timestamp wraps at 2^32; Python reset it to 0 there.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -31,7 +33,7 @@ use relay_media::codec::VoiceCodec;
 use relay_media::opus::OPUS_SILENCE;
 use serde_json::Value;
 
-use crate::connection::{RtcConnection, SendSettings};
+use crate::connection::{RECONNECT_TIMEOUT, RtcConnection, SendSettings};
 use crate::error::VoiceError;
 use crate::receive::Feedback;
 use crate::rtcp;
@@ -142,7 +144,8 @@ struct Active {
 }
 
 pub(crate) struct Sender {
-    conn: Arc<RtcConnection>,
+    /// Replaced by [`Sender::rebind`]; lock order is `active` before `conn`.
+    conn: Mutex<Arc<RtcConnection>>,
     pipeline: VideoSendPipeline,
     cfg: SendSettings,
     /// The stream descriptors we IDENTIFYed with, merged with READY's at start.
@@ -170,7 +173,7 @@ impl Sender {
         pli: Option<PliHandler>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            conn,
+            conn: Mutex::new(conn),
             pipeline: VideoSendPipeline::new(),
             cfg,
             streams,
@@ -201,6 +204,38 @@ impl Sender {
 
     pub(crate) fn set_pli_handler(&self, handler: Option<PliHandler>) {
         *self.pli.lock() = handler;
+    }
+
+    fn conn(&self) -> Arc<RtcConnection> {
+        Arc::clone(&self.conn.lock())
+    }
+
+    /// Moves the sender to `conn` (the stream's new server). A running sender restarts video on the
+    /// new connection's SSRC and negotiated codec (`start_video`, op 12) and announces SPEAKING
+    /// again; the audio sender report counts start over for the new SSRC. Returns `true` when the
+    /// negotiated video codec changed: no video is sent until the owner swaps in a source for it.
+    pub(crate) fn rebind(self: &Arc<Self>, conn: Arc<RtcConnection>) -> Result<bool, VoiceError> {
+        let mut active = self.active.lock();
+        *self.conn.lock() = Arc::clone(&conn);
+        active.audio.packet_count = 0;
+        active.audio.octet_count = 0;
+        active.audio.last_rtcp_media_ms = None;
+        if !self.is_running() {
+            return Ok(false);
+        }
+        let mut codec_changed = false;
+        if let Some(params) = active.params {
+            let before = active.video.as_ref().map(|v| v.codec);
+            let codec = self.apply_video_start(&mut active, params)?;
+            if before.is_some_and(|before| before != codec) {
+                active.video = None;
+                codec_changed = true;
+            }
+        }
+        self.install_feedback();
+        conn.ensure_rtcp_listener();
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        Ok(codec_changed)
     }
 
     /// What the last `play` announced.
@@ -237,7 +272,8 @@ impl Sender {
         if self.is_running() {
             return Err(VoiceError::Invalid("already playing media".into()));
         }
-        if self.conn.is_closed() {
+        let conn = self.conn();
+        if conn.is_closed() {
             return Err(VoiceError::NotConnected);
         }
         {
@@ -248,7 +284,7 @@ impl Sender {
         }
         self.stop.store(false, Ordering::Release);
         self.install_feedback();
-        self.conn.ensure_rtcp_listener();
+        conn.ensure_rtcp_listener();
         self.running.store(true, Ordering::Release);
         let core = Arc::clone(self);
         let spawned = std::thread::Builder::new()
@@ -291,7 +327,7 @@ impl Sender {
         {
             let _ = handle.join();
         }
-        self.conn.receiver().set_feedback_handler(None);
+        self.conn().receiver().set_feedback_handler(None);
     }
 
     /// `_apply_selected_video_stream` with `reset=True`, then the op 12 announcement.
@@ -300,8 +336,8 @@ impl Sender {
         active: &mut Active,
         params: VideoParams,
     ) -> Result<VoiceCodec, VoiceError> {
-        let codec = self
-            .conn
+        let conn = self.conn();
+        let codec = conn
             .session_info()
             .video_codec
             .ok_or_else(|| {
@@ -310,7 +346,7 @@ impl Sender {
             .to_ascii_uppercase()
             .parse::<VoiceCodec>()
             .map_err(|e| VoiceError::Invalid(e.to_string()))?;
-        let streams = negotiated_streams(&self.streams, self.conn.ready_streams());
+        let streams = negotiated_streams(&self.streams, conn.ready_streams());
         let selected = streams
             .iter()
             .filter(|s| s.ssrc.is_some())
@@ -377,14 +413,14 @@ impl Sender {
                 .max_resolution
                 .unwrap_or_else(|| StreamResolution::fixed(params.width, params.height)),
         );
-        self.conn.ws().video_state(ssrc, rtx_ssrc, &[state])?;
+        conn.ws().video_state(ssrc, rtx_ssrc, &[state])?;
         Ok(codec)
     }
 
     /// `_ensure_rtcp_feedback_listener` + `_handle_rtcp_nack` / `_handle_rtcp_pli`.
     fn install_feedback(self: &Arc<Self>) {
         let weak: Weak<Self> = Arc::downgrade(self);
-        self.conn
+        self.conn()
             .receiver()
             .set_feedback_handler(Some(Arc::new(move |feedback| {
                 if let Some(core) = weak.upgrade() {
@@ -420,9 +456,10 @@ impl Sender {
             return;
         }
         add(&self.counters.nack_packets_received, 1);
-        let udp = self.conn.udp();
+        let conn = self.conn();
+        let udp = conn.udp();
         match self.pipeline.send_video_rtx_for_nack(
-            self.conn.crypto_tx(),
+            conn.crypto_tx(),
             &**udp as &dyn PacketSink,
             payload,
             MEDIA_STREAM_TYPE,
@@ -441,14 +478,26 @@ impl Sender {
         let mut next_audio = start;
         let mut next_video = start;
         let mut seen_generation = u64::MAX;
-        while !self.stop.load(Ordering::Acquire) && !self.conn.is_closed() {
+        let mut closed_since: Option<Instant> = None;
+        while !self.stop.load(Ordering::Acquire) {
+            let conn = self.conn();
+            if conn.is_closed() {
+                // `MediaPlayer`: wait for a reconnect (`rebind` bumps the generation)
+                let since = *closed_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= RECONNECT_TIMEOUT {
+                    break;
+                }
+                std::thread::sleep(MAX_SLEEP);
+                continue;
+            }
+            closed_since = None;
             let generation = self.generation.load(Ordering::Acquire);
             if generation != seen_generation {
                 seen_generation = generation;
                 let now = Instant::now();
                 next_audio = now;
                 next_video = now;
-                let _ = self.conn.ws().speak(speaking::SOUNDSHARE, 0);
+                let _ = conn.ws().speak(speaking::SOUNDSHARE, 0);
             }
             let now = Instant::now();
             if now >= next_audio {
@@ -474,14 +523,15 @@ impl Sender {
 
     /// End of playback: trailing Opus silence, then `stop_video`.
     fn finish(&self) {
-        if !self.conn.is_closed() {
+        let conn = self.conn();
+        if !conn.is_closed() {
             let needs_silence = !self.active.lock().audio.last_was_silence;
             if needs_silence {
                 for _ in 0..SILENCE_PACKET_COUNT {
                     self.send_audio_packet(&OPUS_SILENCE);
                 }
             }
-            let _ = self.conn.ws().video_state(0, 0, &[]);
+            let _ = conn.ws().video_state(0, 0, &[]);
         }
         let mut active = self.active.lock();
         active.video = None;
@@ -511,7 +561,8 @@ impl Sender {
         } else {
             0
         };
-        let encrypted = match self.conn.dave().encrypt_opus(data) {
+        let conn = self.conn();
+        let encrypted = match conn.dave().encrypt_opus(data) {
             Ok(encrypted) => encrypted,
             Err(_) => {
                 add(&self.counters.dave_encrypt_errors, 1);
@@ -536,9 +587,9 @@ impl Sender {
             let report = due.then_some((audio.packet_count, audio.octet_count));
             (audio.sequence, timestamp, report)
         };
-        let ssrc = self.conn.ssrc();
+        let ssrc = conn.ssrc();
         if let Some((packets, octets)) = report {
-            self.send_sender_report(ssrc, timestamp, packets, octets);
+            self.send_sender_report(&conn, ssrc, timestamp, packets, octets);
         }
         let packet = (|| {
             let mut header = RtpPacket::new_header(
@@ -553,10 +604,10 @@ impl Sender {
             header = header_with_one_byte_extensions(&header, &extension)?;
             let mut payload = extension;
             payload.extend_from_slice(&encrypted);
-            self.conn.crypto_tx().encrypt_rtp(&header, &payload)
+            conn.crypto_tx().encrypt_rtp(&header, &payload)
         })();
         let sent = match packet {
-            Ok(packet) => self.conn.udp().send_packet(&packet).is_ok(),
+            Ok(packet) => conn.udp().send_packet(&packet).is_ok(),
             Err(_) => false,
         };
         if sent {
@@ -590,17 +641,18 @@ impl Sender {
         } else {
             frame.data
         };
-        let encrypted = match self.conn.dave().encrypt_video(codec, &original) {
+        let conn = self.conn();
+        let encrypted = match conn.dave().encrypt_video(codec, &original) {
             Ok(encrypted) => encrypted,
             Err(_) => {
                 add(&self.counters.dave_encrypt_errors, 1);
                 return VideoTick::Sent(frame_time);
             }
         };
-        let udp = self.conn.udp();
+        let udp = conn.udp();
         let metadata = (codec == VoiceCodec::VP9).then_some(original.as_slice());
         let sent = self.pipeline.send_video_frame(
-            self.conn.crypto_tx(),
+            conn.crypto_tx(),
             &**udp as &dyn PacketSink,
             video.ssrc,
             &encrypted,
@@ -623,6 +675,7 @@ impl Sender {
                         > (video.last_rtcp_media_ms / 1000.0).floor()
                 {
                     self.send_sender_report(
+                        &conn,
                         video.ssrc,
                         summary.rtp_timestamp,
                         video.packet_count,
@@ -638,17 +691,23 @@ impl Sender {
     }
 
     /// `_send_rtcp_sender_report`.
-    fn send_sender_report(&self, ssrc: u32, rtp_timestamp: u32, packets: u32, octets: u32) {
+    fn send_sender_report(
+        &self,
+        conn: &RtcConnection,
+        ssrc: u32,
+        rtp_timestamp: u32,
+        packets: u32,
+        octets: u32,
+    ) {
         let unix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0.0, |d| d.as_secs_f64());
         let (header, body) = rtcp::sender_report(ssrc, unix, rtp_timestamp, packets, octets);
-        let sent = self
-            .conn
+        let sent = conn
             .crypto_tx()
             .encrypt_rtcp(&header, &body)
             .map_err(|_| ())
-            .and_then(|packet| self.conn.udp().send_packet(&packet).map_err(|_| ()));
+            .and_then(|packet| conn.udp().send_packet(&packet).map_err(|_| ()));
         if sent.is_err() {
             add(&self.counters.send_errors, 1);
         }

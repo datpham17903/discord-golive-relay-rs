@@ -71,6 +71,8 @@ fn crypto() -> SharedTransportCrypto {
 enum Ctl {
     Send(Value),
     Close(u16),
+    /// Drop the TCP connection without a close frame.
+    Drop,
 }
 
 struct FakeRtc {
@@ -175,7 +177,8 @@ fn start_udp() -> (SocketAddr, Arc<UdpSide>) {
     (addr, side)
 }
 
-/// `video`: the op 12 message to send right after SESSION_DESCRIPTION.
+/// `video`: the op 12 message to send right after SESSION_DESCRIPTION. The websocket half takes one
+/// connection after the other (a resume opens a new one) and answers RESUME with RESUMED.
 async fn start_rtc(own_ssrc: u32, video: Option<Value>) -> FakeRtc {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ws_addr = listener.local_addr().unwrap();
@@ -185,61 +188,68 @@ async fn start_rtc(own_ssrc: u32, video: Option<Value>) -> FakeRtc {
     let uri = Arc::new(Mutex::new(String::new()));
     let (received2, uri2) = (Arc::clone(&received), Arc::clone(&uri));
     tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let uri3 = Arc::clone(&uri2);
-        let mut ws =
-            tokio_tungstenite::accept_hdr_async(stream, move |req: &Request, resp: Response| {
-                *uri3.lock().unwrap() = req.uri().to_string();
-                Ok(resp)
-            })
+        while let Ok((stream, _)) = listener.accept().await {
+            let uri3 = Arc::clone(&uri2);
+            let mut ws = tokio_tungstenite::accept_hdr_async(
+                stream,
+                move |req: &Request, resp: Response| {
+                    *uri3.lock().unwrap() = req.uri().to_string();
+                    Ok(resp)
+                },
+            )
             .await
             .unwrap();
-        ws.send(Message::text(
-            json!({"op": 8, "d": {"heartbeat_interval": 5000}}).to_string(),
-        ))
-        .await
-        .unwrap();
-        loop {
-            tokio::select! {
-                msg = ws.next() => {
-                    let Some(Ok(msg)) = msg else { return };
-                    let Message::Text(text) = msg else { continue };
-                    let v: Value = serde_json::from_str(text.as_str()).unwrap();
-                    match v["op"].as_u64().unwrap() {
-                        3 => {
-                            ws.send(Message::text(json!({"op": 6, "d": {"t": v["d"]["t"]}}).to_string())).await.unwrap();
-                            continue;
-                        }
-                        0 => {
-                            ws.send(Message::text(json!({"op": 2, "d": {
-                                "ssrc": own_ssrc, "ip": "127.0.0.1", "port": udp_addr.port(),
-                                "modes": ["aead_xchacha20_poly1305_rtpsize", "aead_aes256_gcm_rtpsize"],
-                                "streams": [], "experiments": ["fixed_keyframe_interval"],
-                            }}).to_string())).await.unwrap();
-                        }
-                        1 => {
-                            ws.send(Message::text(json!({"op": 4, "d": {
-                                "mode": "aead_aes256_gcm_rtpsize", "secret_key": secret_key(),
-                                "audio_codec": "opus", "video_codec": "H264",
-                                "media_session_id": "media-1", "keyframe_interval": 2000,
-                                "dave_protocol_version": 0,
-                            }}).to_string())).await.unwrap();
-                            if let Some(video) = &video {
-                                ws.send(Message::text(video.to_string())).await.unwrap();
+            ws.send(Message::text(
+                json!({"op": 8, "d": {"heartbeat_interval": 5000}}).to_string(),
+            ))
+            .await
+            .unwrap();
+            loop {
+                tokio::select! {
+                    msg = ws.next() => {
+                        let Some(Ok(msg)) = msg else { break };
+                        let Message::Text(text) = msg else { continue };
+                        let v: Value = serde_json::from_str(text.as_str()).unwrap();
+                        match v["op"].as_u64().unwrap() {
+                            3 => {
+                                ws.send(Message::text(json!({"op": 6, "d": {"t": v["d"]["t"]}}).to_string())).await.unwrap();
+                                continue;
                             }
+                            7 => {
+                                ws.send(Message::text(json!({"op": 9, "d": null}).to_string())).await.unwrap();
+                            }
+                            0 => {
+                                ws.send(Message::text(json!({"op": 2, "d": {
+                                    "ssrc": own_ssrc, "ip": "127.0.0.1", "port": udp_addr.port(),
+                                    "modes": ["aead_xchacha20_poly1305_rtpsize", "aead_aes256_gcm_rtpsize"],
+                                    "streams": [], "experiments": ["fixed_keyframe_interval"],
+                                }}).to_string())).await.unwrap();
+                            }
+                            1 => {
+                                ws.send(Message::text(json!({"op": 4, "d": {
+                                    "mode": "aead_aes256_gcm_rtpsize", "secret_key": secret_key(),
+                                    "audio_codec": "opus", "video_codec": "H264",
+                                    "media_session_id": "media-1", "keyframe_interval": 2000,
+                                    "dave_protocol_version": 0,
+                                }}).to_string())).await.unwrap();
+                                if let Some(video) = &video {
+                                    ws.send(Message::text(video.to_string())).await.unwrap();
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                        received2.lock().unwrap().push(v);
                     }
-                    received2.lock().unwrap().push(v);
+                    ctl = ctl_rx.recv() => match ctl {
+                        Some(Ctl::Send(v)) => ws.send(Message::text(v.to_string())).await.unwrap(),
+                        Some(Ctl::Close(code)) => {
+                            let frame = CloseFrame { code: CloseCode::from(code), reason: "".into() };
+                            let _ = ws.send(Message::Close(Some(frame))).await;
+                        }
+                        Some(Ctl::Drop) => break,
+                        None => return,
+                    },
                 }
-                ctl = ctl_rx.recv() => match ctl {
-                    Some(Ctl::Send(v)) => ws.send(Message::text(v.to_string())).await.unwrap(),
-                    Some(Ctl::Close(code)) => {
-                        let frame = CloseFrame { code: CloseCode::from(code), reason: "".into() };
-                        let _ = ws.send(Message::Close(Some(frame))).await;
-                    }
-                    None => return,
-                },
             }
         }
     });
@@ -1056,6 +1066,236 @@ async fn test_server_update_moves_the_watch_and_keeps_the_listener() {
             frame["depacketized_sha256"].as_str().unwrap()
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_dropped_stream_socket_is_resumed_and_media_keeps_flowing() {
+    let stream_rtc = start_rtc(OWN_STREAM_SSRC, Some(video_message())).await;
+    let mut rig = rig(StreamAnswer::Create {
+        endpoint: stream_rtc.endpoint.clone(),
+    })
+    .await;
+    rig.join().await;
+    let stream = rig
+        .client
+        .watch_stream(&stream_key(), watch_settings(), WAIT)
+        .await
+        .unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    stream.listen(move |p| drop(tx.send(p))).unwrap();
+    wait_user(&stream, MEDIA_SSRC).await;
+
+    // a sequenced message, then the voice server "crashes": 4015 is resumed
+    stream_rtc
+        .ctl
+        .send(Ctl::Send(json!({"op": 15, "d": {"any": 100}, "seq": 7})))
+        .unwrap();
+    stream_rtc.ctl.send(Ctl::Close(4015)).unwrap();
+    assert_eq!(
+        rig.next_event().await,
+        ClientEvent::Reconnected {
+            stream_key: Some(stream_key())
+        }
+    );
+    let resume = stream_rtc.wait_message(7).await;
+    assert_eq!(
+        resume["d"],
+        json!({
+            "token": FAKE_STREAM_TOKEN,
+            "server_id": RTC_SERVER.to_string(),
+            "channel_id": RTC_CHANNEL.to_string(),
+            "session_id": "sess-1",
+            "seq_ack": 7,
+        })
+    );
+    assert_eq!(stream_rtc.messages(0).len(), 1, "no second IDENTIFY");
+    assert!(stream.is_connected());
+    assert_eq!(stream.own_ssrc().unwrap(), OWN_STREAM_SSRC);
+
+    // the UDP session and the listener are the same as before
+    let (wire, frames) = capture("h264");
+    stream_rtc.udp.send(&wire);
+    for frame in &frames {
+        let packet = next_packet(&mut rx).await;
+        assert_eq!(
+            common::sha256_hex(&packet.payload),
+            frame["depacketized_sha256"].as_str().unwrap()
+        );
+    }
+    // commands go out on the new socket
+    stream.request_video(MEDIA_SSRC, 100).unwrap();
+    stream_rtc.wait_message(15).await;
+    assert!(!rig.seen().iter().any(|s| s.starts_with("stream_delete")));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_dropped_voice_socket_is_resumed() {
+    let mut rig = rig(StreamAnswer::Silent).await;
+    rig.join().await;
+    rig.voice.ctl.send(Ctl::Drop).unwrap();
+    assert_eq!(
+        rig.next_event().await,
+        ClientEvent::Reconnected { stream_key: None }
+    );
+    let resume = rig.voice.wait_message(7).await;
+    assert_eq!(resume["d"]["token"], FAKE_VOICE_TOKEN);
+    assert_eq!(resume["d"]["server_id"], GUILD.to_string());
+    assert_eq!(resume["d"]["session_id"], "sess-1");
+    assert!(rig.client.is_connected());
+    assert_eq!(rig.voice.messages(0).len(), 1, "no second IDENTIFY");
+    assert_eq!(rig.seen(), [format!("voice_state:Some({CHANNEL})")]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_forced_close_waits_for_the_stream_server_update() {
+    let first = start_rtc(OWN_STREAM_SSRC, Some(video_message())).await;
+    let second = start_rtc(OWN_STREAM_SSRC + 1, Some(video_message())).await;
+    let mut rig = rig(StreamAnswer::Create {
+        endpoint: first.endpoint.clone(),
+    })
+    .await;
+    rig.join().await;
+    let stream = rig
+        .client
+        .watch_stream(&stream_key(), watch_settings(), WAIT)
+        .await
+        .unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    stream.listen(move |p| drop(tx.send(p))).unwrap();
+
+    // 4014 before the gateway's STREAM_SERVER_UPDATE: wait for it instead of giving up
+    first.ctl.send(Ctl::Close(4014)).unwrap();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while stream.is_connected() {
+        assert!(tokio::time::Instant::now() < deadline, "still connected");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        rig.events.try_recv().is_err(),
+        "nothing reported while waiting"
+    );
+    assert!(!rig.seen().iter().any(|s| s.starts_with("stream_delete")));
+
+    rig.client.handle_event(LinkEvent::StreamServerUpdate {
+        stream_key: stream_key(),
+        token: Some(Secret::new("FAKE-new-token")),
+        endpoint: Some(second.endpoint.clone()),
+    });
+    assert_eq!(
+        rig.next_event().await,
+        ClientEvent::Reconnected {
+            stream_key: Some(stream_key())
+        }
+    );
+    assert_eq!(stream.own_ssrc().unwrap(), OWN_STREAM_SSRC + 1);
+    let identify = second.wait_message(0).await;
+    assert_eq!(identify["d"]["token"], "FAKE-new-token");
+    wait_user(&stream, MEDIA_SSRC).await;
+    let (wire, frames) = capture("h264");
+    second.udp.send(&wire);
+    for frame in &frames {
+        let packet = next_packet(&mut rx).await;
+        assert_eq!(
+            common::sha256_hex(&packet.payload),
+            frame["depacketized_sha256"].as_str().unwrap()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_voice_server_moves_mid_session() {
+    let second = start_rtc(7002, None).await;
+    let third = start_rtc(7003, None).await;
+    let mut rig = rig(StreamAnswer::Silent).await;
+    rig.join().await;
+    let voice_server_update = |endpoint: &str, token: &str| LinkEvent::VoiceServerUpdate {
+        token: Some(Secret::new(token)),
+        endpoint: Some(format!("wss://{endpoint}")),
+        guild_id: Some(GUILD),
+        channel_id: None,
+    };
+
+    // VOICE_SERVER_UPDATE while connected: close with 4014, IDENTIFY on the new server
+    rig.client
+        .handle_event(voice_server_update(&second.endpoint, "FAKE-voice-token-2"));
+    assert_eq!(
+        rig.next_event().await,
+        ClientEvent::Reconnected { stream_key: None }
+    );
+    let identify = second.wait_message(0).await;
+    assert_eq!(identify["d"]["token"], "FAKE-voice-token-2");
+    assert_eq!(identify["d"]["session_id"], "sess-1");
+    assert!(rig.client.is_connected());
+    assert_eq!(rig.client.connection().unwrap().ssrc(), 7002);
+
+    // 4014 first, the gateway's VOICE_SERVER_UPDATE after: wait for it
+    second.ctl.send(Ctl::Close(4014)).unwrap();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while rig.client.is_connected() {
+        assert!(tokio::time::Instant::now() < deadline, "still connected");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        rig.events.try_recv().is_err(),
+        "nothing reported while waiting"
+    );
+    rig.client
+        .handle_event(voice_server_update(&third.endpoint, "FAKE-voice-token-3"));
+    assert_eq!(
+        rig.next_event().await,
+        ClientEvent::Reconnected { stream_key: None }
+    );
+    assert_eq!(
+        third.wait_message(0).await["d"]["token"],
+        "FAKE-voice-token-3"
+    );
+    assert!(rig.client.is_connected());
+    // never left nor re-joined the channel
+    assert_eq!(rig.seen(), [format!("voice_state:Some({CHANNEL})")]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_reconnect_option_handshakes_again_after_a_close() {
+    let stream_rtc = start_rtc(OWN_STREAM_SSRC, Some(video_message())).await;
+    let mut rig = rig(StreamAnswer::Create {
+        endpoint: stream_rtc.endpoint.clone(),
+    })
+    .await;
+    rig.join().await;
+    let mut settings = watch_settings();
+    settings.reconnect = true;
+    let stream = rig
+        .client
+        .watch_stream(&stream_key(), settings, WAIT)
+        .await
+        .unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    stream.listen(move |p| drop(tx.send(p))).unwrap();
+
+    // 4006 is not resumable: without `reconnect` it ends the watch (see above); with it, a fresh
+    // IDENTIFY on the same server
+    stream_rtc.ctl.send(Ctl::Close(4006)).unwrap();
+    assert_eq!(
+        rig.next_event().await,
+        ClientEvent::Reconnected {
+            stream_key: Some(stream_key())
+        }
+    );
+    assert_eq!(stream_rtc.messages(0).len(), 2);
+    assert!(stream.is_connected());
+    wait_user(&stream, MEDIA_SSRC).await;
+    let (wire, frames) = capture("h264");
+    stream_rtc.udp.send(&wire);
+    for frame in &frames {
+        let packet = next_packet(&mut rx).await;
+        assert_eq!(
+            common::sha256_hex(&packet.payload),
+            frame["depacketized_sha256"].as_str().unwrap()
+        );
+    }
+    assert!(!rig.seen().iter().any(|s| s.starts_with("stream_delete")));
 }
 
 #[test]

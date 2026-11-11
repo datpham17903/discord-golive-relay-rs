@@ -9,10 +9,18 @@
 //! `VoiceClient`: Discord only gives a session to a client that really joined the channel, and the
 //! stream clients borrow its `session_id`.
 //!
-//! Like the Python relay (`reconnect=False`), nothing reconnects by itself after a failure: a dead
-//! websocket or an external disconnect is reported as [`ClientEvent::Disconnected`] and the caller
-//! rejoins. The one thing that does reconnect is a new VOICE_SERVER_UPDATE / STREAM_SERVER_UPDATE
-//! with a different server while connected (the server moved), as in Python.
+//! Recovery follows `_poll_voice_ws`, for this connection and for each stream's:
+//! - a websocket that drops with 4015 or without a close code is resumed underneath (RESUME, same
+//!   session); [`ClientEvent::Reconnected`] reports it;
+//! - a new VOICE_SERVER_UPDATE / STREAM_SERVER_UPDATE naming another server while connected closes
+//!   the socket with 4014 and handshakes against the new server, keeping the DAVE state;
+//! - a close with 4014 / 4022 waits up to [`RECONNECT_TIMEOUT`] for the gateway to name a server
+//!   (being disconnected from voice meanwhile ends it);
+//! - anything else ends in [`ClientEvent::Disconnected`] unless [`RtcSettings::reconnect`] is set
+//!   (the Python relay passes `reconnect=False`), in which case a fresh handshake is tried.
+//!
+//! Deviation: with `reconnect`, the voice connection handshakes again with the voice server it
+//! knows; Python also left and re-joined the channel (op 4) first.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,7 +31,10 @@ use parking_lot::Mutex;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
-use crate::connection::{ConnEvent, RtcConnection, RtcSettings, RtcTarget};
+use crate::connection::{
+    AfterClose, ConnEvent, RECONNECT_ATTEMPTS, RECONNECT_TIMEOUT, RtcConnection, RtcSettings,
+    RtcTarget, after_close, connect_with_retries,
+};
 use crate::dave::Dave;
 use crate::error::VoiceError;
 use crate::link::{
@@ -44,14 +55,15 @@ pub enum ClientEvent {
         stream_key: Option<String>,
         error: String,
     },
-    /// The media connection is gone (websocket closed, or we were disconnected from voice). The
-    /// client does not recover on its own.
+    /// The media connection is gone for good (websocket closed and not recovered, or we were
+    /// disconnected from voice).
     Disconnected {
         stream_key: Option<String>,
         code: Option<u16>,
         reason: String,
     },
-    /// The connection was re-established against a new server.
+    /// The connection recovered: its websocket was resumed, or it was re-established (against a new
+    /// server). A stream we publish keeps playing.
     Reconnected { stream_key: Option<String> },
     /// STREAM_DELETE for a stream being watched; the stream client is already torn down.
     StreamEnded {
@@ -129,10 +141,13 @@ pub(crate) struct VcState {
     channel_id: u64,
     session_id: Option<String>,
     server: Option<(ServerInfo, u64)>,
-    /// The server the live connection was made to.
+    /// The server the live (or reconnecting) connection was made to; `None` while a forced close
+    /// waits for the gateway to name a server.
     connected_server: Option<(String, String)>,
     on_voice_state: Option<VoiceStateCallback>,
     conn: Option<Arc<RtcConnection>>,
+    /// DAVE state of the connection, kept across reconnects.
+    dave: Option<Arc<Dave>>,
     /// We asked to leave: the next VOICE_STATE_UPDATE without a channel is the answer.
     expecting_leave: bool,
     left: bool,
@@ -171,6 +186,7 @@ impl VoiceClient {
                 connected_server: None,
                 on_voice_state: None,
                 conn: None,
+                dave: None,
                 expecting_leave: false,
                 left: false,
                 streams: HashMap::new(),
@@ -312,6 +328,7 @@ impl VoiceClient {
                     let mut st = inner.state.lock();
                     st.phase = Phase::Connected;
                     st.connected_server = Some((server.endpoint, server.token.expose().to_owned()));
+                    st.dave = Some(Arc::clone(conn.dave()));
                     st.conn = Some(conn);
                 }
                 tokio::spawn(Arc::clone(inner).run_voice_events(generation, events));
@@ -539,7 +556,7 @@ impl VcInner {
                         && st
                             .connected_server
                             .as_ref()
-                            .is_some_and(|(endpoint, token)| {
+                            .is_none_or(|(endpoint, token)| {
                                 *endpoint != info.endpoint || token != info.token.expose()
                             })
                     {
@@ -549,7 +566,7 @@ impl VcInner {
                 }
                 self.notify.notify_waiters();
                 if reconnect {
-                    tokio::spawn(self.reconnect_voice());
+                    self.spawn_reconnect(1);
                 }
             }
             LinkEvent::StreamCreate {
@@ -685,6 +702,7 @@ impl VcInner {
             let mut st = self.state.lock();
             st.phase = Phase::Idle;
             st.connected_server = None;
+            st.dave = None;
             st.conn.take()
         };
         if let Some(conn) = conn {
@@ -717,25 +735,68 @@ impl VcInner {
                     error,
                 }),
                 ConnEvent::Message { .. } => {}
+                ConnEvent::Resumed => self.emit(ClientEvent::Reconnected { stream_key: None }),
                 ConnEvent::Closed { code, reason } => {
-                    self.drop_connection(code, reason);
+                    match after_close(code, self.cfg.rtc.reconnect) {
+                        AfterClose::GiveUp => self.drop_connection(code, reason),
+                        AfterClose::AwaitServer => {
+                            self.await_voice_server(generation, code, reason)
+                        }
+                        AfterClose::Reconnect => self.spawn_reconnect(RECONNECT_ATTEMPTS),
+                    }
                     return;
                 }
             }
         }
     }
 
-    /// VOICE_SERVER_UPDATE while connected: the voice server moved. Close the old socket with 4014
-    /// and handshake against the new one, keeping the DAVE state and the session.
-    async fn reconnect_voice(self: Arc<Self>) {
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let (old, target) = {
+    /// `_potential_reconnect` after a 4014 / 4022 close: the next VOICE_SERVER_UPDATE reconnects (see
+    /// `handle_event`); without one within [`RECONNECT_TIMEOUT`] the connection is dropped. Being
+    /// disconnected from voice meanwhile drops it at once.
+    fn await_voice_server(self: &Arc<Self>, generation: u64, code: Option<u16>, reason: String) {
+        let conn = {
             let mut st = self.state.lock();
-            let (Some((server, server_id)), Some(session_id)) =
-                (st.server.clone(), st.session_id.clone())
-            else {
+            if self.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            st.connected_server = None;
+            st.conn.take()
+        };
+        if let Some(conn) = conn {
+            conn.close(1000);
+        }
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(RECONNECT_TIMEOUT).await;
+            if this.generation.load(Ordering::SeqCst) == generation {
+                this.drop_connection(code, reason);
+            }
+        });
+    }
+
+    /// Not async: spawning [`Self::reconnect_voice`] from `run_voice_events` directly would make
+    /// their future types depend on each other.
+    fn spawn_reconnect(self: &Arc<Self>, attempts: u32) {
+        tokio::spawn(Arc::clone(self).reconnect_voice(attempts));
+    }
+
+    /// Handshakes again (fresh IDENTIFY, up to `attempts` times) against the voice server the
+    /// gateway named last, keeping the DAVE state and the session; a live socket is closed with 4014
+    /// first. Runs on VOICE_SERVER_UPDATE while connected (the server moved, or a forced close was
+    /// waiting for it) and for `reconnect`. A newer reconnect or a disconnect supersedes it.
+    async fn reconnect_voice(self: Arc<Self>, attempts: u32) {
+        let (generation, old, dave, target) = {
+            let mut st = self.state.lock();
+            let (Phase::Connected, Some((server, server_id)), Some(session_id), Some(dave)) = (
+                st.phase,
+                st.server.clone(),
+                st.session_id.clone(),
+                st.dave.clone(),
+            ) else {
                 return;
             };
+            let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            st.connected_server = Some((server.endpoint.clone(), server.token.expose().to_owned()));
             let target = RtcTarget {
                 endpoint: server.endpoint,
                 server_id,
@@ -745,36 +806,44 @@ impl VcInner {
                 token: VoiceToken::new(server.token.expose()),
                 dave_group_id: st.channel_id,
             };
-            (st.conn.take(), target)
+            (generation, st.conn.take(), dave, target)
         };
-        let Some(old) = old else { return };
-        let dave = Arc::clone(old.dave());
-        old.close(4014);
-        drop(old);
-        match RtcConnection::connect(
+        if let Some(old) = old {
+            old.close(4014);
+        }
+        let connected = connect_with_retries(
             &self.cfg.http,
             &target,
             &self.cfg.rtc,
-            dave,
-            Duration::from_secs(30),
+            &dave,
+            RECONNECT_TIMEOUT,
+            attempts,
         )
-        .await
-        {
+        .await;
+        let current = |st: &VcState| {
+            self.generation.load(Ordering::SeqCst) == generation && st.phase == Phase::Connected
+        };
+        match connected {
             Ok((conn, events)) => {
+                let conn = Arc::new(conn);
                 {
                     let mut st = self.state.lock();
-                    st.connected_server = Some((
-                        target.endpoint.clone(),
-                        st.server
-                            .as_ref()
-                            .map_or_else(String::new, |(s, _)| s.token.expose().to_owned()),
-                    ));
-                    st.conn = Some(Arc::new(conn));
+                    if !current(&st) {
+                        drop(st);
+                        conn.close(1000);
+                        return;
+                    }
+                    st.conn = Some(conn);
                 }
                 tokio::spawn(Arc::clone(&self).run_voice_events(generation, events));
                 self.emit(ClientEvent::Reconnected { stream_key: None });
             }
-            Err(e) => self.drop_connection(None, e.to_string()),
+            Err(e) => {
+                let current = current(&self.state.lock());
+                if current {
+                    self.drop_connection(None, e.to_string());
+                }
+            }
         }
     }
 }

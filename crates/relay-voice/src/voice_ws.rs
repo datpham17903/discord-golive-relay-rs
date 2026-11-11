@@ -3,9 +3,13 @@
 //! SPEAKING, VIDEO, MEDIA_SINK_WANTS and the DAVE ops 21-31) as used by `discord-native-voice`.
 //!
 //! One tokio task owns the socket. Frames are delivered as [`VoiceEvent`]s; the caller (the voice
-//! client) answers READY with UDP IP discovery and [`VoiceWs::select_protocol`], and decides about
-//! resuming after [`VoiceEvent::Closed`] (a new socket with `resume` and [`VoiceWs::seq_ack`]). The
-//! DAVE ops are handled here against a shared [`Dave`], which survives resumes.
+//! client) answers READY with UDP IP discovery and [`VoiceWs::select_protocol`]. With
+//! [`VoiceWsConfig::resume_on_drop`] the task resumes by itself when the socket drops the way
+//! `_poll_voice_ws` resumes (close code 4015, or no close code at all): a new socket on the same
+//! URL sends RESUME (op 7) with the same session, token and `seq_ack`, commands sent meanwhile go out
+//! on it, and the server's RESUMED shows up as [`VoiceEvent::Resumed`]. Anything else ends in
+//! [`VoiceEvent::Closed`] and the caller decides. The DAVE ops are handled here against a shared
+//! [`Dave`], which survives resumes.
 //!
 //! Differences from the Python library, all deliberate:
 //! - READY does not run IP discovery inline (that belongs to the UDP transport owner); it is reported
@@ -13,7 +17,12 @@
 //! - No `Sec-WebSocket-Extensions: permessage-deflate` header: `wreq` cannot inflate frames.
 //! - A DAVE failure (bad external sender, proposals...) is reported as [`VoiceEvent::DaveError`]
 //!   instead of tearing the socket down.
+//! - A resume does not send op 4 again nor wait for a new SESSION_DESCRIPTION (the voice server
+//!   answers RESUME with RESUMED only); it keeps the UDP socket and the transport keys. It is tried up
+//!   to [`RESUME_ATTEMPTS`] times within `connect_timeout`, pausing `1 + 2i` seconds between failed
+//!   attempts like `_inner_connect`.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
@@ -31,6 +40,10 @@ use crate::transport::TransportEncryptionMode;
 /// Voice gateway version of the pinned `discord.py-self` (`wss://{endpoint}/?v=9`).
 pub const VOICE_GATEWAY_VERSION: u8 = 9;
 const MAX_MESSAGE_SIZE: usize = 15 * 1024 * 1024;
+/// Resume attempts in a row without a RESUMED (`_inner_connect` tries 5 times).
+pub const RESUME_ATTEMPTS: u32 = 5;
+/// `_poll_voice_ws`: the server crashed and the session can be resumed.
+pub const CLOSE_RESUMABLE: u16 = 4015;
 
 pub mod op {
     pub const IDENTIFY: u8 = 0;
@@ -309,6 +322,9 @@ pub struct VoiceWsConfig {
     pub resume: bool,
     /// `seq_ack` carried over from the previous socket (`-1` on a fresh connection).
     pub seq_ack: i64,
+    /// Resume on a new socket when this one drops with 4015 or without a close code (see the module
+    /// documentation) instead of ending the event stream.
+    pub resume_on_drop: bool,
 }
 
 impl VoiceWsConfig {
@@ -343,6 +359,7 @@ impl VoiceWsConfig {
             connect_timeout: Duration::from_secs(30),
             resume: false,
             seq_ack: -1,
+            resume_on_drop: false,
         }
     }
 }
@@ -357,6 +374,7 @@ impl fmt::Debug for VoiceWsConfig {
             .field("token", &self.token)
             .field("resume", &self.resume)
             .field("seq_ack", &self.seq_ack)
+            .field("resume_on_drop", &self.resume_on_drop)
             .finish_non_exhaustive()
     }
 }
@@ -452,30 +470,7 @@ impl VoiceWs {
         config: VoiceWsConfig,
         dave: Arc<Dave>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<VoiceEvent>), VoiceWsError> {
-        let request = http
-            .websocket(config.url.clone())
-            .header("Accept", "*/*")
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .header("Origin", &config.origin)
-            .header("User-Agent", &config.user_agent)
-            .max_message_size(MAX_MESSAGE_SIZE)
-            .send();
-        let mut ws = tokio::time::timeout(config.connect_timeout, async {
-            request.await?.into_websocket().await
-        })
-        .await
-        .map_err(|_| VoiceWsError::Connect("timed out".into()))?
-        .map_err(|e| VoiceWsError::Connect(e.to_string()))?;
-
-        let first = if config.resume {
-            resume_payload(&config)
-        } else {
-            identify_payload(&config)
-        };
-        ws.send(Message::text(first.to_string()))
-            .await
-            .map_err(|e| VoiceWsError::Connect(e.to_string()))?;
-
+        let ws = open(http, &config, config.resume, config.seq_ack).await?;
         let config = Arc::new(config);
         let shared = Arc::new(Shared {
             ssrc: AtomicU32::new(0),
@@ -485,7 +480,8 @@ impl VoiceWs {
         let (ev_tx, ev_rx) = mpsc::unbounded_channel();
         let now = Instant::now();
         let task = Task {
-            ws,
+            ws: Some(ws),
+            http: http.clone(),
             config: Arc::clone(&config),
             dave,
             shared: Arc::clone(&shared),
@@ -496,6 +492,8 @@ impl VoiceWs {
             next_beat: None,
             last_ack: now,
             last_recv: now,
+            pending: VecDeque::new(),
+            resume_attempts: 0,
         };
         tokio::spawn(task.run());
         Ok((
@@ -638,7 +636,7 @@ fn identify_payload(c: &VoiceWsConfig) -> Value {
     })
 }
 
-fn resume_payload(c: &VoiceWsConfig) -> Value {
+fn resume_payload(c: &VoiceWsConfig, seq_ack: i64) -> Value {
     json!({
         "op": op::RESUME,
         "d": {
@@ -646,7 +644,7 @@ fn resume_payload(c: &VoiceWsConfig) -> Value {
             "server_id": c.server_id.to_string(),
             "channel_id": c.channel_id.to_string(),
             "session_id": c.session_id,
-            "seq_ack": c.seq_ack,
+            "seq_ack": seq_ack,
         },
     })
 }
@@ -705,22 +703,79 @@ fn dave_frame(out: &DaveOut) -> Message {
 
 type Ws = wreq::ws::WebSocket;
 
+/// `from_connection_state`: opens a socket to `config.url` and sends IDENTIFY, or RESUME with
+/// `seq_ack`, straight away.
+async fn open(
+    http: &wreq::Client,
+    config: &VoiceWsConfig,
+    resume: bool,
+    seq_ack: i64,
+) -> Result<Ws, VoiceWsError> {
+    let request = http
+        .websocket(config.url.clone())
+        .header("Accept", "*/*")
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("Origin", &config.origin)
+        .header("User-Agent", &config.user_agent)
+        .max_message_size(MAX_MESSAGE_SIZE)
+        .send();
+    let mut ws = tokio::time::timeout(config.connect_timeout, async {
+        request.await?.into_websocket().await
+    })
+    .await
+    .map_err(|_| VoiceWsError::Connect("timed out".into()))?
+    .map_err(|e| VoiceWsError::Connect(e.to_string()))?;
+
+    let first = if resume {
+        resume_payload(config, seq_ack)
+    } else {
+        identify_payload(config)
+    };
+    ws.send(Message::text(first.to_string()))
+        .await
+        .map_err(|e| VoiceWsError::Connect(e.to_string()))?;
+    Ok(ws)
+}
+
 struct Exit {
     code: Option<u16>,
     reason: String,
+    /// The server or the network ended the socket in a way `_poll_voice_ws` resumes from.
+    resumable: bool,
 }
 
 impl Exit {
+    /// Ended by us or by a protocol error: never resumed.
     fn new(code: Option<u16>, reason: impl Into<String>) -> Self {
         Self {
             code,
             reason: reason.into(),
+            resumable: false,
+        }
+    }
+
+    /// The socket broke without a close frame (`CurlError`, no code).
+    fn dropped(reason: impl Into<String>) -> Self {
+        Self {
+            resumable: true,
+            ..Self::new(None, reason)
+        }
+    }
+
+    /// The server sent a close frame.
+    fn closed(code: Option<u16>, reason: impl Into<String>) -> Self {
+        Self {
+            resumable: code.is_none_or(|c| c == CLOSE_RESUMABLE),
+            ..Self::new(code, reason)
         }
     }
 }
 
 struct Task {
-    ws: Ws,
+    /// `None` between the sockets of a resume.
+    ws: Option<Ws>,
+    /// For the sockets of a resume.
+    http: wreq::Client,
     config: Arc<VoiceWsConfig>,
     dave: Arc<Dave>,
     shared: Arc<Shared>,
@@ -733,6 +788,17 @@ struct Task {
     last_ack: Instant,
     /// Any frame (`poll_event` wait_for timeout).
     last_recv: Instant,
+    /// Commands that arrived while there was no socket (a resume in progress), sent on the next.
+    pending: VecDeque<Outgoing>,
+    /// Resumes tried since the last RESUMED.
+    resume_attempts: u32,
+}
+
+async fn recv_opt(ws: &mut Option<Ws>) -> Option<Result<Message, wreq::Error>> {
+    match ws {
+        Some(ws) => ws.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn sleep_until_opt(at: Option<Instant>) {
@@ -744,19 +810,106 @@ async fn sleep_until_opt(at: Option<Instant>) {
 
 impl Task {
     async fn run(mut self) {
-        let exit = self.serve().await;
+        let exit = loop {
+            let exit = self.serve().await;
+            if !(exit.resumable && self.config.resume_on_drop) {
+                break exit;
+            }
+            if let Err(exit) = self.resume(exit).await {
+                break exit;
+            }
+        };
         let _ = self.ev_tx.send(VoiceEvent::Closed {
             code: exit.code,
             reason: exit.reason,
         });
     }
 
+    /// `_poll_voice_ws` on 4015 / no code: a new socket that sends RESUME. Gives up (with the exit
+    /// that ended the last socket) after [`RESUME_ATTEMPTS`] attempts without a RESUMED or once
+    /// `connect_timeout` has passed; a close by the owner meanwhile ends it too.
+    async fn resume(&mut self, last: Exit) -> Result<(), Exit> {
+        // let the server see the old connection go at once
+        self.ws = None;
+        let deadline = Instant::now() + self.config.connect_timeout;
+        let mut pause = Duration::ZERO;
+        let mut failure: Option<String> = None;
+        let give_up = |failure: Option<String>| match failure {
+            Some(e) => Exit::new(last.code, format!("{}; resume failed: {e}", last.reason)),
+            None => Exit::new(last.code, last.reason.clone()),
+        };
+        loop {
+            let wake = Instant::now() + pause;
+            if self.resume_attempts >= RESUME_ATTEMPTS || wake >= deadline {
+                return Err(give_up(failure));
+            }
+            self.wait_without_socket(wake).await?;
+            let attempt = self.resume_attempts;
+            self.resume_attempts += 1;
+            let seq_ack = self.shared.seq_ack.load(Ordering::Relaxed);
+            let config = Arc::clone(&self.config);
+            let http = self.http.clone();
+            let connect = async move { open(&http, &config, true, seq_ack).await };
+            match self.wait_without_socket_for(deadline, connect).await? {
+                Some(Ok(ws)) => {
+                    self.ws = Some(ws);
+                    let now = Instant::now();
+                    self.interval = None;
+                    self.next_beat = None;
+                    self.last_ack = now;
+                    self.last_recv = now;
+                    return Ok(());
+                }
+                Some(Err(e)) => failure = Some(e.to_string()),
+                None => return Err(give_up(Some("timed out".into()))),
+            }
+            // `_inner_connect`: 1, 3, 5... seconds between attempts
+            pause = Duration::from_secs(1 + 2 * u64::from(attempt));
+        }
+    }
+
+    /// Sleeps until `until` while there is no socket; see [`Self::wait_without_socket_for`].
+    async fn wait_without_socket(&mut self, until: Instant) -> Result<(), Exit> {
+        self.wait_without_socket_for(until, std::future::pending::<()>())
+            .await
+            .map(|_| ())
+    }
+
+    /// Runs `work` until `until` (`None` when it is not done by then) while there is no socket:
+    /// commands are kept for the next socket, and a close or a dropped handle ends the wait.
+    async fn wait_without_socket_for<T>(
+        &mut self,
+        until: Instant,
+        work: impl std::future::Future<Output = T>,
+    ) -> Result<Option<T>, Exit> {
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                out = &mut work => return Ok(Some(out)),
+                () = tokio::time::sleep_until(until) => return Ok(None),
+                cmd = self.cmd_rx.recv() => match cmd {
+                    Some(Outgoing::Close(code)) => return Err(Exit::new(Some(code), "closed by client")),
+                    Some(other) => self.pending.push_back(other),
+                    None => return Err(Exit::new(Some(1000), "handle dropped")),
+                },
+                () = self.ev_tx.closed() => {
+                    return Err(Exit::new(Some(1000), "event receiver dropped"));
+                }
+            }
+        }
+    }
+
     async fn serve(&mut self) -> Exit {
+        while let Some(cmd) = self.pending.pop_front() {
+            if let Some(exit) = self.on_command(Some(cmd)).await {
+                return exit;
+            }
+        }
         loop {
             let beat_at = self.next_beat;
             let silent_at = self.last_recv + self.config.heartbeat_timeout;
             let exit = tokio::select! {
-                msg = self.ws.recv() => self.on_ws_message(msg).await,
+                msg = recv_opt(&mut self.ws) => self.on_ws_message(msg).await,
                 () = sleep_until_opt(beat_at) => self.beat().await,
                 () = tokio::time::sleep_until(silent_at) => {
                     Some(Exit::new(None, "no message received"))
@@ -778,15 +931,19 @@ impl Task {
             code: code.into(),
             reason: "".into(),
         };
-        let _ = self.ws.send(Message::Close(Some(frame))).await;
+        if let Some(ws) = self.ws.as_mut() {
+            let _ = ws.send(Message::Close(Some(frame))).await;
+        }
     }
 
     async fn send(&mut self, msg: Message) -> Option<Exit> {
-        self.ws
-            .send(msg)
+        let Some(ws) = self.ws.as_mut() else {
+            return Some(Exit::dropped("no socket"));
+        };
+        ws.send(msg)
             .await
             .err()
-            .map(|e| Exit::new(None, e.to_string()))
+            .map(|e| Exit::dropped(e.to_string()))
     }
 
     async fn on_command(&mut self, cmd: Option<Outgoing>) -> Option<Exit> {
@@ -826,13 +983,13 @@ impl Task {
     async fn on_ws_message(&mut self, msg: Option<Result<Message, wreq::Error>>) -> Option<Exit> {
         self.last_recv = Instant::now();
         match msg {
-            None => Some(Exit::new(None, "socket closed")),
-            Some(Err(e)) => Some(Exit::new(None, e.to_string())),
+            None => Some(Exit::dropped("socket closed")),
+            Some(Err(e)) => Some(Exit::dropped(e.to_string())),
             Some(Ok(Message::Close(frame))) => {
                 let (code, reason) = frame.map_or((None, String::new()), |f| {
                     (Some(u16::from(f.code)), f.reason.as_str().to_owned())
                 });
-                Some(Exit::new(code, reason))
+                Some(Exit::closed(code, reason))
             }
             Some(Ok(Message::Text(t))) => match serde_json::from_str::<Value>(t.as_str()) {
                 Ok(v) => self.on_text(v).await,
@@ -889,7 +1046,10 @@ impl Task {
         match opcode {
             op::READY => return self.on_ready(&d).await,
             op::HEARTBEAT_ACK => self.last_ack = Instant::now(),
-            op::RESUMED => self.emit(VoiceEvent::Resumed),
+            op::RESUMED => {
+                self.resume_attempts = 0;
+                self.emit(VoiceEvent::Resumed);
+            }
             op::SESSION_DESCRIPTION => return self.on_session_description(&d).await,
             op::SESSION_UPDATE => {
                 let update = session_info(&d, &self.info);

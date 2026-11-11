@@ -1432,6 +1432,65 @@ service_test!(test_status_exposes_audio_counters, async {
     }
 });
 
+async fn http_get(addr: std::net::SocketAddr, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: relay\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    out
+}
+
+service_test!(test_metrics_endpoints_serve_the_last_status, async {
+    let env = env(Setup::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(relayctl::metrics::serve(
+        listener,
+        Arc::new(env.svc.metrics_endpoints()),
+    ));
+    // nothing written yet
+    assert!(!env.svc.healthy(monotonic()));
+    assert!(
+        http_get(addr, "/healthz")
+            .await
+            .starts_with("HTTP/1.1 503 ")
+    );
+    let task = env.reach_relaying().await;
+    let relaying = "relay_state{state=\"relaying\"} 1";
+    wait_until(|| env.svc.metrics_text(monotonic()).contains(relaying)).await;
+    assert!(env.svc.healthy(monotonic()));
+    // status.json older than 15 s is not healthy
+    assert!(!env.svc.healthy(monotonic() + 16.0));
+    let health = http_get(addr, "/healthz").await;
+    assert!(
+        health.starts_with("HTTP/1.1 200 OK\r\n") && health.ends_with("\r\n\r\nok"),
+        "{health}"
+    );
+    let metrics = http_get(addr, "/metrics").await;
+    let generation = format!("relay_generation {}", env.svc.current_ids().0);
+    for line in ["relay_up 1", relaying, &generation] {
+        assert!(metrics.lines().any(|l| l == line), "{line}:\n{metrics}");
+    }
+    for family in [
+        "relay_counter_total{name=\"action.",
+        "relay_ingest_send{stat=\"sent\"}",
+    ] {
+        assert!(metrics.contains(family), "{family}:\n{metrics}");
+    }
+    assert_eq!(env.shutdown(task).await, 0);
+    assert!(!env.svc.healthy(monotonic()));
+    assert!(
+        http_get(addr, "/healthz")
+            .await
+            .starts_with("HTTP/1.1 503 ")
+    );
+    server.abort();
+});
+
 // ------------------------------------------------------------------ chat
 
 service_test!(test_chat_target_command_persists_and_restarts, async {

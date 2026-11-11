@@ -27,6 +27,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::hash::{Hash, Hasher};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -81,6 +82,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 
+use crate::metrics::{self, Endpoints, HEALTH_MAX_AGE_S};
 use crate::tokens::load_token;
 
 pub const TICK_S: f64 = 0.1;
@@ -723,6 +725,8 @@ pub struct Service {
     slate_tasks: Arc<Tracker>,
     ingest_lock: tokio::sync::Mutex<()>,
     done: watch::Sender<bool>,
+    /// The last status.json written and when (monotonic): what `--metrics-listen` serves.
+    status_written: Mutex<Option<(f64, Value)>>,
 }
 
 enum ChatFail {
@@ -931,6 +935,7 @@ impl Service {
                 slate_tasks: Arc::new(Tracker::default()),
                 ingest_lock: tokio::sync::Mutex::new(()),
                 done: watch::Sender::new(false),
+                status_written: Mutex::new(None),
                 cfg,
             }
         });
@@ -3801,8 +3806,45 @@ impl Service {
 
     fn write_status(&self, c: &mut Core) {
         let status = self.status_dict_locked(c);
-        if let Err(e) = write_status(&self.cfg.storage.state_directory, &status) {
-            self.log("status_write_failed", json!({"error": e.to_string()}));
+        match write_status(&self.cfg.storage.state_directory, &status) {
+            Ok(()) => *self.status_written.lock() = Some((monotonic(), status)),
+            Err(e) => self.log("status_write_failed", json!({"error": e.to_string()})),
+        }
+    }
+
+    /// `/healthz`: the service has not finished and wrote status.json in the last
+    /// [`HEALTH_MAX_AGE_S`] (the ticker writes it every [`STATUS_S`]).
+    pub fn healthy(&self, now: f64) -> bool {
+        !*self.done.borrow()
+            && self
+                .status_written
+                .lock()
+                .as_ref()
+                .is_some_and(|(at, _)| now - at <= HEALTH_MAX_AGE_S)
+    }
+
+    /// `/metrics`: the last status.json as Prometheus text.
+    pub fn metrics_text(&self, now: f64) -> String {
+        let up = self.healthy(now);
+        let last = self.status_written.lock();
+        metrics::render(
+            last.as_ref().map(|(_, status)| status),
+            last.as_ref().map(|(at, _)| now - at),
+            up,
+        )
+    }
+
+    /// The `--metrics-listen` endpoints; they hold the service weakly.
+    pub fn metrics_endpoints(self: &Arc<Self>) -> Endpoints {
+        let (h, m) = (Arc::downgrade(self), Arc::downgrade(self));
+        Endpoints {
+            healthy: Box::new(move || h.upgrade().is_some_and(|s| s.healthy(monotonic()))),
+            metrics: Box::new(move || {
+                m.upgrade().map_or_else(
+                    || metrics::render(None, None, false),
+                    |s| s.metrics_text(monotonic()),
+                )
+            }),
         }
     }
 
@@ -4261,8 +4303,13 @@ pub const EXIT_CONFIG: i32 = 78;
 /// (`LimitCORE=0`): `setrlimit` needs `unsafe` libc calls, which the workspace forbids.
 ///
 /// Exit codes follow `cli.py::_run`: a held instance lock is 1; an unreadable output token or a
-/// state the service cannot start from is 78.
-pub async fn run_service(cfg: RelayConfig, token: Token) -> i32 {
+/// state the service cannot start from is 78. `metrics_listen` serves `/healthz` and `/metrics`
+/// there; an address that cannot be bound is 1.
+pub async fn run_service(
+    cfg: RelayConfig,
+    token: Token,
+    metrics_listen: Option<SocketAddr>,
+) -> i32 {
     let accounts = cfg.output_accounts();
     let mut out_tokens = HashMap::new();
     let mut secrets = vec![token.expose().to_string()];
@@ -4348,7 +4395,29 @@ pub async fn run_service(cfg: RelayConfig, token: Token) -> i32 {
             return EXIT_CONFIG;
         }
     };
-    svc.run(token).await
+    let mut metrics_task = None;
+    if let Some(addr) = metrics_listen {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                let address = listener.local_addr().unwrap_or(addr).to_string();
+                log("metrics_listening", json!({"address": address}));
+                let endpoints = Arc::new(svc.metrics_endpoints());
+                metrics_task = Some(tokio::spawn(metrics::serve(listener, endpoints)));
+            }
+            Err(e) => {
+                log(
+                    "metrics_listen_failed",
+                    json!({"address": addr.to_string(), "error": e.to_string()}),
+                );
+                return 1;
+            }
+        }
+    }
+    let code = svc.run(token).await;
+    if let Some(task) = metrics_task {
+        task.abort();
+    }
+    code
 }
 
 fn stderr_logger(secrets: &[String]) -> JsonLogger {

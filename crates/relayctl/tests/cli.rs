@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -43,8 +44,8 @@ impl Harness {
         Self {
             env: HashMap::new(),
             lookup: Arc::new(|_| Box::pin(async { panic!("no lookup expected") })),
-            run_service: Box::new(|cfg, token| {
-                Box::pin(relayctl::service::run_service(cfg, token))
+            run_service: Box::new(|cfg, token, metrics| {
+                Box::pin(relayctl::service::run_service(cfg, token, metrics))
             }),
         }
     }
@@ -534,7 +535,7 @@ async fn resolve_account_ids_failed_lookup_names_credential() {
 fn recording_service(h: &mut Harness) -> Arc<Mutex<Vec<Vec<u64>>>> {
     let locked = Arc::new(Mutex::new(Vec::new()));
     let rec = Arc::clone(&locked);
-    h.run_service = Box::new(move |cfg, _token| {
+    h.run_service = Box::new(move |cfg, _token, _metrics| {
         let ids = std::iter::once(cfg.discord.expected_relay_user_id)
             .chain(cfg.output_accounts().iter().map(|a| a.user_id))
             .collect();
@@ -608,6 +609,68 @@ fn run_explicit_ids_need_no_lookup() {
     let r = h.main(&["run", "--config", s(&cfg)]);
     assert_eq!(r.code, 1, "{}", r.err);
     assert_eq!(*locked.lock().unwrap(), [vec![20, 21, 22]]);
+}
+
+/// A `run_service` that records the metrics address it was given and stops there with exit 1.
+fn metrics_recorder(h: &mut Harness) -> Arc<Mutex<Vec<Option<SocketAddr>>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let rec = Arc::clone(&seen);
+    h.run_service = Box::new(move |_cfg, _token, metrics| {
+        rec.lock().unwrap().push(metrics);
+        Box::pin(async { 1 })
+    });
+    seen
+}
+
+fn runnable(tmp: &Path) -> (PathBuf, Harness) {
+    let cfg = default_short_form(tmp);
+    write_manifests(&cfg, 11);
+    let h = Harness::new().token_dir(tmp, ALL_TOKENS).with_ids(IDS);
+    (cfg, h)
+}
+
+#[test]
+fn run_metrics_listen_comes_from_the_flag_or_the_environment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, mut h) = runnable(tmp.path());
+    let seen = metrics_recorder(&mut h);
+    let flag = [
+        "run",
+        "--config",
+        s(&cfg),
+        "--metrics-listen",
+        "127.0.0.1:9108",
+    ];
+    assert_eq!(h.main(&["run", "--config", s(&cfg)]).code, 1);
+    assert_eq!(h.main(&flag).code, 1);
+    h.env
+        .insert(cli::METRICS_LISTEN_ENV.into(), " [::1]:9200 ".into());
+    assert_eq!(h.main(&["run", "--config", s(&cfg)]).code, 1);
+    assert_eq!(h.main(&flag).code, 1); // the flag wins
+    let addr = |a: &str| Some(a.parse::<SocketAddr>().unwrap());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            None,
+            addr("127.0.0.1:9108"),
+            addr("[::1]:9200"),
+            addr("127.0.0.1:9108")
+        ]
+    );
+}
+
+#[test]
+fn run_refuses_a_bad_metrics_address() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, mut h) = runnable(tmp.path());
+    let seen = metrics_recorder(&mut h);
+    let r = h.main(&["run", "--config", s(&cfg), "--metrics-listen", "localhost"]);
+    assert_eq!(r.code, 2, "{}", r.err);
+    h.env.insert(cli::METRICS_LISTEN_ENV.into(), "nope".into());
+    let r = h.main(&["run", "--config", s(&cfg)]);
+    assert_eq!(r.code, EXIT_CONFIG);
+    assert!(r.err.contains(cli::METRICS_LISTEN_ENV), "{}", r.err);
+    assert!(seen.lock().unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------- tokens

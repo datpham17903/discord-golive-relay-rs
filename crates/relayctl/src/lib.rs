@@ -3,5 +3,6 @@
 
 pub mod calibrate;
 pub mod cli;
+pub mod metrics;
 pub mod service;
 pub mod tokens;

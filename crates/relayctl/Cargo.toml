@@ -15,7 +15,7 @@ relay-media = { path = "../relay-media" }
 relay-voice = { path = "../relay-voice" }
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "signal", "net"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "net", "io-util"] }
 
 [dev-dependencies]
 tempfile.workspace = true

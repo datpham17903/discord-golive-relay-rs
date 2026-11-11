@@ -242,7 +242,7 @@ relayctl run      --config config.yaml
 | --- | --- |
 | `relayctl validate --config FILE` | Checks the config and approved profile. No Discord connection. Prints `config valid`, then one `not operable: ...` line per reason the service would refuse to run (null `T_dead`, profile not approved). Exit 1 on an invalid config. |
 | `relayctl doctor --config FILE` | Checks the config, state directory and capability manifest. Never publishes. No encoder or decoder probes. Exit 1 if any check fails. |
-| `relayctl run --config FILE` | Runs the service. Exit 78 means a config or credential problem (no automatic restart under systemd). Starts disabled on first run. |
+| `relayctl run --config FILE [--metrics-listen IP:PORT]` | Runs the service. Exit 78 means a config or credential problem (no automatic restart under systemd). Starts disabled on first run. `--metrics-listen`: see Monitoring below. |
 | `relayctl status [--state-dir DIR]` | Shows state, enabled flag, FATAL, quarantine, profile. Asks the running service, else reads `status.json` or `state.json`. |
 | `relayctl enable [--state-dir DIR]` | Sets `desired_enabled=true`. Does not clear FATAL or quarantine. |
 | `relayctl disable [--state-dir DIR]` | Sets `desired_enabled=false` and stops the session. Survives restarts. |
@@ -253,6 +253,17 @@ relayctl run      --config config.yaml
 A fresh install is disabled. Run `relayctl enable` once. The service then relays automatically whenever the target shares in the allowed voice channel. It stops when the target stops sharing, leaves or moves, or when you run `relayctl disable` (or SIGINT/SIGTERM). Runtime state (enabled flag, FATAL latch, quarantine, rejection counter) is in `state.json` inside the state directory; the config is never modified.
 
 Windows note: the control socket is a Unix socket and does not exist on Windows. There, `enable`, `disable` and `reset-fatal` change `state.json` directly and `status` reads the files, so run them while the service is stopped or after it exited.
+
+### Monitoring
+
+`relayctl run --metrics-listen 127.0.0.1:9108` (or `RELAY_METRICS_LISTEN=127.0.0.1:9108`; the flag wins) serves two read-only endpoints over plain HTTP. It is off by default; an address that cannot be bound stops the service with exit 1.
+
+| Endpoint | Answer |
+| --- | --- |
+| `GET /healthz` | `200` `ok` while the service runs and has written `status.json` in the last 15 s, else `503` |
+| `GET /metrics` | Prometheus text built from the last `status.json` (written every second) |
+
+Metrics: `relay_up`, `relay_status_age_seconds`, `relay_state{state}`, `relay_desired_enabled`, `relay_fatal`, `relay_generation`, `relay_epoch`, `relay_adapter_running`, `relay_consecutive_rejections`, `relay_viewers`, `relay_counter_total{name}` and `relay_gauge{name}` (the `metrics` counters and gauges of `status.json`, `worker.*` included), `relay_ingest_send{stat}`, and per output account `relay_account_state{account,state}`, `relay_account_fatal{account}`, `relay_account_viewers{account}`, `relay_account_consecutive_rejections{account}`, `relay_account_send{account,stat}`. The `*_send` values count the last status interval (about one second). No token or channel ID is exposed; output accounts appear by user ID. There is no authentication: bind to `127.0.0.1` or a private interface.
 
 ### Chat commands
 

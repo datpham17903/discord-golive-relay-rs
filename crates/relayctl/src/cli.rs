@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::future::Future;
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
@@ -29,6 +30,8 @@ pub const EXIT_OK: i32 = 0;
 pub const EXIT_FAIL: i32 = 1;
 pub const DEFAULT_STATE_DIR: &str = "/var/lib/discord-relay";
 pub const SOCKET_NAME: &str = "control.sock";
+/// `relayctl run` reads the metrics address from here when `--metrics-listen` is not given.
+pub const METRICS_LISTEN_ENV: &str = "RELAY_METRICS_LISTEN";
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -37,7 +40,7 @@ pub enum Command {
     /// Check that this machine and config can run the relay.
     Doctor(ConfigArgs),
     /// Run the relay service.
-    Run(ConfigArgs),
+    Run(RunArgs),
     /// Print the service status (or the persisted state when it is not running).
     Status(StateArgs),
     /// Stop relaying.
@@ -52,6 +55,16 @@ pub enum Command {
 pub struct ConfigArgs {
     #[arg(long)]
     pub config: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    #[arg(long)]
+    pub config: PathBuf,
+    /// Serve GET /healthz and GET /metrics (Prometheus) over plain HTTP on this IP:port, e.g.
+    /// 127.0.0.1:9108. Off by default; also read from RELAY_METRICS_LISTEN.
+    #[arg(long, value_name = "IP:PORT")]
+    pub metrics_listen: Option<SocketAddr>,
 }
 
 #[derive(Debug, Args)]
@@ -88,7 +101,8 @@ struct Cli {
 pub type Env<'a> = dyn Fn(&str) -> Option<String> + 'a;
 pub type Lookup<'a> =
     dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send>> + 'a;
-pub type RunService<'a> = dyn Fn(RelayConfig, Token) -> Pin<Box<dyn Future<Output = i32>>> + 'a;
+pub type RunService<'a> =
+    dyn Fn(RelayConfig, Token, Option<SocketAddr>) -> Pin<Box<dyn Future<Output = i32>>> + 'a;
 
 /// The process around a command: output streams, environment, the token -> user-id lookup and the
 /// service entry.
@@ -135,7 +149,7 @@ pub fn run(command: Command, ctx: &mut Ctx<'_>) -> i32 {
     match command {
         Command::Validate(a) => validate(&a.config, ctx),
         Command::Doctor(a) => doctor(&a.config, ctx),
-        Command::Run(a) => run_relay(&a.config, ctx),
+        Command::Run(a) => run_relay(&a, ctx),
         Command::Status(a) => status(&a.state_dir, ctx),
         Command::Disable(a) => state_command("disable", &a.state_dir, None, ctx),
         Command::Enable(a) => state_command("enable", &a.state_dir, None, ctx),
@@ -149,8 +163,11 @@ pub fn run_process(command: Command) -> i32 {
     let lookup = |token: String| -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send>> {
         Box::pin(fetch_user_id(token))
     };
-    let run_service = |cfg: RelayConfig, token: Token| -> Pin<Box<dyn Future<Output = i32>>> {
-        Box::pin(crate::service::run_service(cfg, token))
+    let run_service = |cfg: RelayConfig,
+                       token: Token,
+                       metrics_listen: Option<SocketAddr>|
+     -> Pin<Box<dyn Future<Output = i32>>> {
+        Box::pin(crate::service::run_service(cfg, token, metrics_listen))
     };
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     run(
@@ -609,7 +626,24 @@ fn resolve_ids(cfg: RelayConfig, ctx: &mut Ctx<'_>) -> Result<RelayConfig, Confi
     rt.block_on(resolve_account_ids(&cfg, &tokens, ctx.lookup, ctx.err))
 }
 
-fn run_relay(cfg_path: &Path, ctx: &mut Ctx<'_>) -> i32 {
+fn run_relay(args: &RunArgs, ctx: &mut Ctx<'_>) -> i32 {
+    let metrics_listen = match args.metrics_listen {
+        Some(addr) => Some(addr),
+        None => match (ctx.env)(METRICS_LISTEN_ENV).filter(|v| !v.trim().is_empty()) {
+            None => None,
+            Some(v) => match v.trim().parse::<SocketAddr>() {
+                Ok(addr) => Some(addr),
+                Err(_) => {
+                    ctx.warn(&format!(
+                        "{METRICS_LISTEN_ENV}: not an IP:port address: {}",
+                        v.trim()
+                    ));
+                    return EXIT_CONFIG;
+                }
+            },
+        },
+    };
+    let cfg_path = args.config.as_path();
     let Some(cfg) = load(cfg_path, ctx) else {
         return EXIT_CONFIG;
     };
@@ -642,7 +676,7 @@ fn run_relay(cfg_path: &Path, ctx: &mut Ctx<'_>) -> i32 {
             return EXIT_FAIL;
         }
     };
-    rt.block_on((ctx.run_service)(cfg, Token::new(token)))
+    rt.block_on((ctx.run_service)(cfg, Token::new(token), metrics_listen))
 }
 
 #[cfg(all(test, unix))]

@@ -454,6 +454,8 @@ struct PendingDaveFrame {
     rtp_packets: Vec<RtpPacketInfo>,
     received_at: Instant,
     queued_at: Instant,
+    /// A decrypt of this frame already failed and was counted in `Dave::decrypt_failures`.
+    counted: bool,
 }
 
 #[derive(Default)]
@@ -561,7 +563,7 @@ impl Receiver {
     /// that have arrived since are released first, like Python.
     pub fn process_batch(&self, batch: &[Vec<u8>], received_at: Instant) -> Vec<Packet> {
         let mut st = self.state.lock();
-        let mut out = self.retry_pending_dave(&mut st);
+        let mut out = self.retry_pending_dave(&mut st, received_at);
         let (failed, decrypted) = match self.crypto_rx.decrypt_rtp_packets(batch) {
             Ok(result) => result,
             Err(_) => {
@@ -809,10 +811,10 @@ impl Receiver {
 
         let looks_like_dave = looks_like_dave_protocol_frame(&frame);
         if looks_like_dave && !self.can_attempt_dave(p.user_id) {
-            self.stash_dave_frame(st, &p, frame, rtp_packets);
+            self.stash_dave_frame(st, &p, frame, rtp_packets, false);
             return None;
         }
-        match self.decrypt_video(p.user_id, frame.clone()) {
+        match self.decrypt_video(p.user_id, frame.clone(), true) {
             Ok(payload) => Some(self.video_packet(
                 st,
                 &p.decoded,
@@ -824,7 +826,7 @@ impl Receiver {
                 p.received_at,
             )),
             Err(e) if looks_like_dave && e.is_retryable() => {
-                self.stash_dave_frame(st, &p, frame, rtp_packets);
+                self.stash_dave_frame(st, &p, frame, rtp_packets, true);
                 None
             }
             Err(_) => {
@@ -873,15 +875,18 @@ impl Receiver {
         user_id.is_some_and(|user| self.dave.has_session() && self.dave.can_decrypt(user))
     }
 
-    /// `_decrypt_video_frame`: the payload untouched when no key can exist for the sender.
+    /// `_decrypt_video_frame`: the payload untouched when no key can exist for the sender. A failure
+    /// is counted in `Dave::decrypt_failures` only when `count`.
     fn decrypt_video(
         &self,
         user_id: Option<u64>,
         payload: Vec<u8>,
+        count: bool,
     ) -> Result<Vec<u8>, DaveDecryptError> {
         match user_id {
             Some(user) if self.can_attempt_dave(Some(user)) => {
-                self.dave.decrypt(user, DaveMedia::Video, &payload)
+                self.dave
+                    .decrypt_counting(user, DaveMedia::Video, &payload, count)
             }
             _ => Ok(payload),
         }
@@ -894,6 +899,7 @@ impl Receiver {
         p: &Received,
         payload: Vec<u8>,
         rtp_packets: Vec<RtpPacketInfo>,
+        counted: bool,
     ) {
         let now = Instant::now();
         let mut expired = 0;
@@ -919,26 +925,30 @@ impl Receiver {
             rtp_packets,
             received_at: p.received_at,
             queued_at: now,
+            counted,
         });
     }
 
-    /// `_retry_pending_dave_video_frames`.
-    fn retry_pending_dave(&self, st: &mut RxState) -> Vec<Packet> {
+    /// `_retry_pending_dave_video_frames`, at every batch (`now` is its arrival). A frame's decrypt
+    /// failure is counted once, not at every retry; frames that age out are counted as
+    /// `dave_pending_expired`.
+    fn retry_pending_dave(&self, st: &mut RxState, now: Instant) -> Vec<Packet> {
         if st.pending_dave.is_empty() {
             return Vec::new();
         }
-        let now = Instant::now();
         let mut ready = Vec::new();
         let mut remaining = VecDeque::new();
-        while let Some(frame) = st.pending_dave.pop_front() {
+        let mut expired = 0;
+        while let Some(mut frame) = st.pending_dave.pop_front() {
             if now.saturating_duration_since(frame.queued_at) > DAVE_PENDING_VIDEO_MAX_AGE {
+                expired += 1;
                 continue;
             }
             if !self.can_attempt_dave(frame.user_id) {
                 remaining.push_back(frame);
                 continue;
             }
-            match self.decrypt_video(frame.user_id, frame.payload.clone()) {
+            match self.decrypt_video(frame.user_id, frame.payload.clone(), !frame.counted) {
                 Ok(payload) => ready.push(self.video_packet(
                     st,
                     &frame.decoded,
@@ -949,11 +959,17 @@ impl Receiver {
                     frame.rtp_packets,
                     frame.received_at,
                 )),
-                Err(e) if e.is_retryable() => remaining.push_back(frame),
+                Err(e) if e.is_retryable() => {
+                    frame.counted = true;
+                    remaining.push_back(frame);
+                }
                 Err(_) => {}
             }
         }
         st.pending_dave = remaining;
+        if expired > 0 {
+            self.stat(st, "dave_pending_expired", expired);
+        }
         if !ready.is_empty() {
             self.stat(st, "dave_pending_retried", ready.len() as u64);
         }

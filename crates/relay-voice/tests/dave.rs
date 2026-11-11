@@ -350,3 +350,70 @@ fn davey_020_installs_keys_only_after_prepare_transition() {
         vec![1, 2, 3, 4]
     );
 }
+
+/// A DAVE frame held back for a key that never comes is retried at every batch; its decrypt failure
+/// counts once, and its expiry is counted on its own.
+#[test]
+fn held_back_video_frame_counts_one_decrypt_failure() {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use common::CollectSink;
+    use relay_voice::receive::{ReceiveConfig, Receiver, SsrcMap, VideoState};
+    use relay_voice::rtp::RtpPacket;
+    use relay_voice::transport::TransportEncryptionMode;
+    use relay_voice::transport::packets::SharedTransportCrypto;
+    use relay_voice::voice_ws::video_codec_list;
+
+    const STRANGER: u64 = 42;
+    const SSRC: u32 = 5000;
+    let crypto = || {
+        SharedTransportCrypto::new(TransportEncryptionMode::AeadAes256GcmRtpSize, &[7; 32]).unwrap()
+    };
+    let (a, _b) = establish(3);
+    let dave = Arc::new(a);
+    let mut cfg = ReceiveConfig::new(video_codec_list(&[VoiceCodec::H264], false), 1);
+    cfg.debug_stats = true;
+    let ssrcs = Arc::new(SsrcMap::new());
+    ssrcs.update_video_state(
+        STRANGER,
+        VideoState {
+            audio_ssrc: None,
+            video_ssrc: Some(SSRC),
+            rtx_ssrc: None,
+            streams: Vec::new(),
+        },
+    );
+    let rx = Receiver::new(
+        cfg,
+        crypto(),
+        crypto(),
+        Arc::new(CollectSink::default()),
+        Arc::clone(&dave),
+        ssrcs,
+    );
+
+    // an IDR NAL with a well-formed DAVE trailer, from a user whose key never arrives
+    let mut nal = vec![0x65, 0x88, 0x84, 1];
+    nal.extend_from_slice(&[0xAA; 8]); // tag
+    nal.push(0x05); // nonce
+    nal.push(12); // supplemental size
+    nal.extend_from_slice(&[0xFA, 0xFA]);
+    let header = RtpPacket::new_header(105, 1, 1000, SSRC, true, false);
+    let packet = crypto().encrypt_rtp(&header, &nal).unwrap();
+    assert!(rx.process_batch(&[packet], Instant::now()).is_empty());
+    assert_eq!(dave.decrypt_failures(), 1);
+
+    for _ in 0..20 {
+        assert!(rx.process_batch(&[], Instant::now()).is_empty());
+    }
+    assert_eq!(dave.decrypt_failures(), 1, "retries are not new failures");
+    assert!(!rx.stats().contains_key("dave_pending_expired"));
+
+    let later = Instant::now() + Duration::from_secs(11);
+    assert!(rx.process_batch(&[], later).is_empty());
+    assert_eq!(rx.stats()["dave_pending_expired"], 1);
+    assert!(rx.process_batch(&[], later).is_empty());
+    assert_eq!(rx.stats()["dave_pending_expired"], 1);
+    assert_eq!(dave.decrypt_failures(), 1);
+}

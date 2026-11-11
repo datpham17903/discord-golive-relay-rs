@@ -180,7 +180,8 @@ impl Dave {
         self.inner.lock().session.is_some()
     }
 
-    /// Frames `decrypt` could not decrypt (including retryable ones).
+    /// Frames `decrypt` could not decrypt (including retryable ones). A held-back video frame that the
+    /// receive pipeline retries counts once.
     pub fn decrypt_failures(&self) -> u64 {
         self.decrypt_failures.load(Ordering::Relaxed)
     }
@@ -325,12 +326,26 @@ impl Dave {
         media: DaveMedia,
         payload: &[u8],
     ) -> Result<Vec<u8>, DaveDecryptError> {
+        self.decrypt_counting(user_id, media, payload, true)
+    }
+
+    /// [`Dave::decrypt`]; a failure adds to [`Dave::decrypt_failures`] only when `count` (a retry
+    /// of a frame whose failure was already counted passes `false`).
+    pub(crate) fn decrypt_counting(
+        &self,
+        user_id: u64,
+        media: DaveMedia,
+        payload: &[u8],
+        count: bool,
+    ) -> Result<Vec<u8>, DaveDecryptError> {
         let mut inner = self.inner.lock();
         let Some(session) = inner.session.as_mut() else {
             return Err(DaveDecryptError::NoSession);
         };
         session.decrypt(user_id, media.raw(), payload).map_err(|e| {
-            self.decrypt_failures.fetch_add(1, Ordering::Relaxed);
+            if count {
+                self.decrypt_failures.fetch_add(1, Ordering::Relaxed);
+            }
             classify_decrypt_error(e)
         })
     }

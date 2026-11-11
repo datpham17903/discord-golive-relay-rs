@@ -1,11 +1,13 @@
 //! REST client, port of the request-header construction in `discord/http.py::HTTPClient.request`
 //! and `static_login`.
 //!
-//! Not ported (not needed for login): ratelimit buckets, retry/backoff on 429/5xx, captcha,
+//! Retries port `request()`'s loop: up to 5 attempts, 429 waits `retry_after`, 5xx backs off `1 + 2 * try` s.
+//! Not ported (not needed for login): ratelimit buckets, captcha,
 //! `X-Discord-Timezone` (needs a local tz lookup), `X-Installation-ID`.
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Deserializer};
 use wreq::header::{AUTHORIZATION, HeaderValue};
@@ -105,8 +107,9 @@ impl RestClient {
     /// `static_login`: `GET /users/@me?with_analytics_token=true`; 401 is `LoginFailed`.
     pub async fn login(&self) -> Result<User> {
         let resp = self
-            .request(wreq::Method::GET, "/users/@me?with_analytics_token=true")?
-            .send()
+            .send_retrying(|| {
+                self.request(wreq::Method::GET, "/users/@me?with_analytics_token=true")
+            })
             .await?;
         let status = resp.status();
         if status.as_u16() == 401 {
@@ -154,13 +157,15 @@ impl RestClient {
             "allowed_mentions": {"parse": [], "replied_user": false},
         });
         let resp = self
-            .request(
-                wreq::Method::POST,
-                &format!("/channels/{channel_id}/messages"),
-            )?
-            .header("X-Context-Properties", CHAT_INPUT_CONTEXT)
-            .json(&body)
-            .send()
+            .send_retrying(|| {
+                Ok(self
+                    .request(
+                        wreq::Method::POST,
+                        &format!("/channels/{channel_id}/messages"),
+                    )?
+                    .header("X-Context-Properties", CHAT_INPUT_CONTEXT)
+                    .json(&body))
+            })
             .await?;
         let status = resp.status();
         if status.is_success() {
@@ -175,6 +180,42 @@ impl RestClient {
                 .unwrap_or("")
                 .to_owned(),
         })
+    }
+
+    /// Sends the request built by `build`, retrying like the Python library: a 429 sleeps `retry_after`
+    /// (JSON body, else `Retry-After`), 500/502/503/504 sleep `1 + 2 * attempt` s; at most 5 attempts, after
+    /// which the last response is returned for the caller to report.
+    async fn send_retrying(
+        &self,
+        build: impl Fn() -> Result<wreq::RequestBuilder>,
+    ) -> Result<wreq::Response> {
+        const ATTEMPTS: u32 = 5;
+        let mut attempt = 0;
+        loop {
+            let resp = build()?.send().await?;
+            let status = resp.status().as_u16();
+            attempt += 1;
+            if attempt >= ATTEMPTS || !matches!(status, 429 | 500 | 502 | 503 | 504) {
+                return Ok(resp);
+            }
+            let delay = if status == 429 {
+                let header = resp
+                    .headers()
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<f64>().ok());
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                body.get("retry_after")
+                    .and_then(serde_json::Value::as_f64)
+                    .or(header)
+                    .filter(|s| *s > 0.0)
+                    .and_then(|s| Duration::try_from_secs_f64(s).ok())
+                    .unwrap_or(Duration::from_secs(1))
+            } else {
+                Duration::from_secs(1 + 2 * u64::from(attempt - 1))
+            };
+            tokio::time::sleep(delay).await;
+        }
     }
 
     fn request(&self, method: wreq::Method, path: &str) -> Result<wreq::RequestBuilder> {

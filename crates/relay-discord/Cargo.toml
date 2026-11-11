@@ -23,7 +23,7 @@ zstd.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "test-util"] }
 tokio-tungstenite.workspace = true
 wiremock.workspace = true
 

@@ -328,3 +328,153 @@ async fn reply_failure_carries_the_api_message() {
         other => panic!("{other:?}"),
     }
 }
+
+async fn rest_for(server: &MockServer) -> RestClient {
+    mount_cordapi(server).await;
+    RestClient::new(urls_for(server), Token::new(FAKE_TOKEN))
+        .await
+        .unwrap()
+}
+
+fn count(requests: &[wiremock::Request], p: &str) -> usize {
+    requests.iter().filter(|r| r.url.path() == p).count()
+}
+
+#[tokio::test(start_paused = true)]
+async fn login_honours_retry_after_from_the_body_then_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v9/users/@me"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .set_body_json(json!({"message": "slow", "retry_after": 2.5})),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v9/users/@me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "7"})))
+        .mount(&server)
+        .await;
+    let rest = rest_for(&server).await;
+    let t0 = tokio::time::Instant::now();
+    assert_eq!(rest.login().await.unwrap().id, 7);
+    assert!(
+        t0.elapsed() >= Duration::from_millis(2500),
+        "{:?}",
+        t0.elapsed()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_after_header_is_used_when_the_body_has_none() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v9/channels/60/messages"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "4"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v9/channels/60/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "1"})))
+        .mount(&server)
+        .await;
+    let rest = rest_for(&server).await;
+    let t0 = tokio::time::Instant::now();
+    rest.reply(None, 60, 900, "x").await.unwrap();
+    assert!(t0.elapsed() >= Duration::from_secs(4), "{:?}", t0.elapsed());
+    let requests = server.received_requests().await.unwrap();
+    let nonces: Vec<Value> = requests
+        .iter()
+        .filter(|r| r.url.path() == "/api/v9/channels/60/messages")
+        .map(|r| serde_json::from_slice::<Value>(&r.body).unwrap()["nonce"].clone())
+        .collect();
+    assert_eq!(nonces.len(), 2);
+    assert_eq!(nonces[0], nonces[1], "a retry reuses the nonce");
+}
+
+#[tokio::test(start_paused = true)]
+async fn persistent_429_stops_after_five_attempts_with_status_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v9/channels/60/messages"))
+        .respond_with(
+            ResponseTemplate::new(429).set_body_json(
+                json!({"message": "You are being rate limited.", "retry_after": 0.1}),
+            ),
+        )
+        .mount(&server)
+        .await;
+    let rest = rest_for(&server).await;
+    match rest.reply(None, 60, 900, "x").await.unwrap_err() {
+        Error::Status { status, message } => {
+            assert_eq!(
+                (status, message.as_str()),
+                (429, "You are being rate limited.")
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(count(&requests, "/api/v9/channels/60/messages"), 5);
+}
+
+#[tokio::test(start_paused = true)]
+async fn server_errors_back_off_and_retry() {
+    for status in [500, 502, 503, 504] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v9/users/@me"))
+            .respond_with(ResponseTemplate::new(status))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v9/users/@me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "7"})))
+            .mount(&server)
+            .await;
+        let rest = rest_for(&server).await;
+        let t0 = tokio::time::Instant::now();
+        assert_eq!(rest.login().await.unwrap().id, 7, "{status}");
+        // 1 s after the first failure, 3 s after the second.
+        assert!(
+            t0.elapsed() >= Duration::from_secs(4),
+            "{status}: {:?}",
+            t0.elapsed()
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn persistent_5xx_gives_up_after_five_attempts() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v9/users/@me"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let rest = rest_for(&server).await;
+    assert!(matches!(
+        rest.login().await.unwrap_err(),
+        Error::Status { status: 503, .. }
+    ));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(count(&requests, "/api/v9/users/@me"), 5);
+}
+
+#[tokio::test(start_paused = true)]
+async fn client_errors_are_not_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v9/channels/60/messages"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+    let rest = rest_for(&server).await;
+    assert!(rest.reply(None, 60, 900, "x").await.is_err());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(count(&requests, "/api/v9/channels/60/messages"), 1);
+}

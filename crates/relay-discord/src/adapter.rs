@@ -962,11 +962,17 @@ impl Inner {
         // in place before the first packet, which may ask for the video SSRC
         self.hot.lock().sc = Some(sc.clone());
         let me = Arc::downgrade(self);
-        sc.listen(move |packet| {
+        let listening = sc.listen(move |packet| {
             if let Some(inner) = me.upgrade() {
                 inner.on_packet(&packet);
             }
-        })?;
+        });
+        if let Err(e) = listening {
+            // the stream is connected but never tracked in `st.sc`: nothing else would close it
+            self.hot.lock().sc = None;
+            sc.disconnect().await;
+            return Err(e.into());
+        }
         let task = tokio::spawn(twcc_loop(Arc::downgrade(self), sc.clone(), twcc));
         let mut st = self.st.lock();
         st.sc = Some(sc);
@@ -1237,6 +1243,23 @@ impl Inner {
                         negotiated_video_codec: Some(codec.to_ascii_uppercase()),
                     }));
                 }
+            }
+            ClientEvent::Disconnected {
+                stream_key: Some(key),
+                ..
+            } => {
+                // the watch connection ended by itself: its feedback loop has nothing left to send on
+                let mut st = self.st.lock();
+                if st.sc.as_ref().is_some_and(|sc| sc.key() == key)
+                    && let Some(task) = st.twcc_task.take()
+                {
+                    task.abort();
+                }
+                drop(st);
+                self.log(
+                    "voice_event",
+                    json!({"event": "Disconnected", "stream_key": key}),
+                );
             }
             other => self.log("voice_event", json!({"event": format!("{other:?}")})),
         }

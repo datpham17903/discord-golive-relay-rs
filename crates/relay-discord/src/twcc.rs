@@ -194,9 +194,10 @@ impl TwccSender {
         self.sent.load(Ordering::Relaxed)
     }
 
-    /// A new watch starts counting again (`watch` resets `_twcc_sent`).
+    /// A new watch starts counting again (`watch` resets `_twcc_sent`) and may report a failure again.
     pub fn reset_sent(&self) {
         self.sent.store(0, Ordering::Relaxed);
+        self.failed.store(false, Ordering::Relaxed);
     }
 
     /// One tick: nothing happens until the video SSRC is known. Returns the error text of the first
@@ -482,5 +483,9 @@ mod tests {
         assert_eq!(sender.sent(), 1);
         sender.reset_sent();
         assert_eq!(sender.sent(), 0);
+        // a new watch reports its own first failure
+        t.record(9, 5.0);
+        let again = sender.tick(&t, Ok(11), Some(22), |_, _| Err("boom2".into()));
+        assert_eq!(again, Some(("send", "boom2".to_owned())));
     }
 }

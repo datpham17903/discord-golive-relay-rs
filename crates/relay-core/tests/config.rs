@@ -1238,3 +1238,44 @@ fn test_bad_id_item_message_uses_python_repr() {
         assert!(errs.contains(&want), "{want} not in {errs:?}");
     }
 }
+
+fn example_with_python_style_accounts(dir: &Path, accounts: &str) -> PathBuf {
+    let text = std::fs::read_to_string(example_path())
+        .unwrap()
+        .replace("\r\n", "\n");
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.starts_with("  relay_accounts:") {
+            out.push_str(accounts);
+        } else if !line.starts_with("  mirror_accounts:") {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    write_text(dir, &out)
+}
+
+#[test]
+fn python_style_flow_closers_at_column_zero_load() {
+    let tmp = tempdir().unwrap();
+    let p = example_with_python_style_accounts(
+        tmp.path(),
+        "  relay_accounts: [\n    {credential: relay1},\n    {credential: relay2}\n]               # comment\n  mirror_accounts: [\n    {credential: mirror1}\n]\n",
+    );
+    let cfg = load_config(&p).unwrap_or_else(|e| panic!("{:?}", e.errors));
+    assert_eq!(cfg.discord.relay_accounts().len(), 2);
+    assert_eq!(cfg.discord.mirror_accounts().len(), 1);
+}
+
+#[test]
+fn unfixable_indentation_error_gets_a_hint_with_the_line() {
+    let tmp = tempdir().unwrap();
+    // The bad line is not a lone closer, so the pre-pass leaves it and the parser rejects it.
+    let p = example_with_python_style_accounts(
+        tmp.path(),
+        "  relay_accounts: [\n    {credential: relay1},\n]  x\n",
+    );
+    let e = load_config(&p).unwrap_err();
+    let msg = e.errors.join("\n");
+    assert!(msg.contains("hint: line"), "{msg}");
+}

@@ -1232,13 +1232,113 @@ fn build(raw: Option<&Yaml>, errors: &Errors, warnings: &mut Vec<String>) -> Opt
     })
 }
 
+/// PyYAML accepts a flow collection whose closing `]`/`}` sits on its own line at a column not deeper than
+/// the line that opened it (the production Python configs do this); saphyr rejects it. Re-indents exactly
+/// such lines to one column deeper than the opening line, keeping the line count. A line is touched only if
+/// it is a lone `]` or `}` (plus an optional `#` comment), closes a flow collection opened on an earlier
+/// line that was itself indented, and is not deeper than that line. Quoted scalars (also multi-line) and
+/// block scalar bodies (`|`/`>`) are skipped. Not modelled: tags/anchors, `?` complex keys, and plain
+/// scalars containing brackets or quotes after a space.
+fn reindent_flow_closers(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    // Indent of the line that opened each flow collection still open.
+    let mut open: Vec<usize> = Vec::new();
+    let mut quote: Option<char> = None;
+    // Indent of the line owning the block scalar whose body we are inside.
+    let mut block: Option<usize> = None;
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let content = body.trim_start_matches(' ');
+        let indent = body.len() - content.len();
+        if let Some(owner) = block {
+            if content.is_empty() || indent > owner {
+                out.push_str(line);
+                continue;
+            }
+            block = None;
+        }
+        if quote.is_none()
+            && let Some(&opener) = open.last()
+            && opener > 0
+            && indent <= opener
+            && let Some(rest) = content.strip_prefix([']', '}'])
+            && (rest.trim().is_empty() || rest.trim_start().starts_with('#'))
+        {
+            out.push_str(&" ".repeat(opener + 1));
+            out.push_str(content);
+            out.push_str(&line[body.len()..]);
+            open.pop();
+            continue;
+        }
+        let mut prev_ws = true;
+        let mut last_sig = ' ';
+        let mut it = body.chars().peekable();
+        while let Some(c) = it.next() {
+            if let Some(q) = quote {
+                if q == '"' && c == '\\' {
+                    it.next();
+                } else if c == q {
+                    if q == '\'' && it.peek() == Some(&'\'') {
+                        it.next();
+                    } else {
+                        quote = None;
+                    }
+                }
+                continue;
+            }
+            let token_start = prev_ws || matches!(last_sig, '[' | '{' | ',' | ':' | '-');
+            match c {
+                '#' if prev_ws => break,
+                '"' | '\'' if token_start => quote = Some(c),
+                '[' | '{' if token_start => open.push(indent),
+                ']' | '}' => {
+                    open.pop();
+                }
+                _ => {}
+            }
+            prev_ws = c == ' ' || c == '\t';
+            if !prev_ws {
+                last_sig = c;
+            }
+        }
+        if quote.is_none() && open.is_empty() && is_block_header(body) {
+            block = Some(indent);
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// A line ending in a block-scalar header: `key: |-`, `- >2+`, `|`.
+fn is_block_header(body: &str) -> bool {
+    let code = body.split(" #").next().unwrap_or("").trim_end();
+    let Some(i) = code.rfind(['|', '>']) else {
+        return false;
+    };
+    let (before, ind) = code.split_at(i);
+    ind[1..].chars().all(|c| matches!(c, '+' | '-' | '1'..='9'))
+        && ind.len() <= 3
+        && (before.is_empty() || before.ends_with([' ', ':', '-']))
+}
+
 /// Load and validate `path`, returning the deprecation warnings next to the config.
 pub fn load_config_with_warnings(path: &Path) -> Result<(RelayConfig, Vec<String>), ConfigInvalid> {
     let unreadable = |why: &dyn std::fmt::Display| ConfigInvalid {
         errors: vec![format!("config: cannot read {}: {why}", path.display())],
     };
     let text = std::fs::read_to_string(path).map_err(|e| unreadable(&e))?;
-    let docs = Yaml::load_from_str(&text).map_err(|e| unreadable(&e))?;
+    let text = reindent_flow_closers(&text);
+    let docs = Yaml::load_from_str(&text).map_err(|e| {
+        let hint = if e.info().contains("indentation") {
+            format!(
+                "; hint: line {}: indent it deeper than the line that opens the enclosing `[`/`{{` collection",
+                e.marker().line()
+            )
+        } else {
+            String::new()
+        };
+        unreadable(&format!("{e}{hint}"))
+    })?;
     if docs.len() > 1 {
         return Err(unreadable(&"expected a single document"));
     }
@@ -1428,4 +1528,65 @@ pub fn ignored_setting_notes(cfg: &RelayConfig) -> Vec<String> {
         );
     }
     notes
+}
+
+#[cfg(test)]
+mod reindent_tests {
+    use super::reindent_flow_closers as fix;
+
+    #[test]
+    fn lone_closer_is_reindented_one_past_the_opener() {
+        assert_eq!(
+            fix("a:\n  b: [\n    {c: d}\n]   # x\n  e: 1\n"),
+            "a:\n  b: [\n    {c: d}\n   ]   # x\n  e: 1\n"
+        );
+        assert_eq!(fix("a:\n  b: [\n    1\n  }\n"), "a:\n  b: [\n    1\n   }\n");
+    }
+
+    #[test]
+    fn crlf_and_nesting() {
+        assert_eq!(
+            fix("a:
+
+  b: [
+
+    [1,
+
+2
+
+]
+
+]
+
+"),
+            "a:
+
+  b: [
+
+    [1,
+
+2
+
+     ]
+
+   ]
+
+"
+        );
+    }
+
+    #[test]
+    fn everything_else_is_untouched() {
+        for src in [
+            "b: [\n]\n",                         // opener at column 0
+            "a:\n  b: [1, 2]\nc: 1\n",           // closed on its own line
+            "a:\n  b: [\n    1]\n",              // closer not alone
+            "a:\n  b: |\n    x: [\n]\n  c: 1\n", // block scalar body
+            "a:\n  b: \"[\n]\"\n",               // quoted
+            "a:\n  b: '[' \n]\n",
+            "a:\n  b: x # [\n]\n", // comment
+        ] {
+            assert_eq!(fix(src), src, "{src:?}");
+        }
+    }
 }

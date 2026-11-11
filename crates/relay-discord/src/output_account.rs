@@ -102,6 +102,9 @@ enum Phase {
 #[derive(Default)]
 struct State {
     vc: Option<VoiceClient>,
+    /// The client being disconnected: no longer `vc`, but it still needs the gateway's voice-state echo
+    /// that completes its leave.
+    leaving: Option<VoiceClient>,
     vc_pump: Option<JoinHandle<()>>,
     out: Option<StreamClient>,
     health: Option<JoinHandle<()>>,
@@ -260,7 +263,10 @@ impl Inner {
             _ => {}
         }
         if let Some(event) = link_event(&d.name, &d.data, uid) {
-            let vc = self.st.lock().vc.clone();
+            let vc = {
+                let st = self.st.lock();
+                st.vc.clone().or_else(|| st.leaving.clone())
+            };
             if let Some(vc) = vc {
                 vc.handle_event(event);
             }
@@ -496,7 +502,9 @@ impl Inner {
             out.disconnect().await;
         }
         if let Some(vc) = vc {
+            self.st.lock().leaving = Some(vc.clone());
             vc.disconnect(LEAVE_TIMEOUT).await;
+            self.st.lock().leaving = None;
         }
         if let Some(net) = self.net() {
             net.set_rtc_connected(false);

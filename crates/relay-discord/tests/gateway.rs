@@ -626,3 +626,40 @@ async fn dropping_every_handle_stops_the_task() {
     assert!(server.await.unwrap());
     assert!(timeout(WAIT, rx.recv()).await.unwrap().is_none());
 }
+
+/// Regression: `close()` must end the event stream promptly, whether or not the server answers the
+/// close frame (a live stop used to wait out the adapter's full 5 s pump timeout).
+#[tokio::test]
+async fn close_ends_the_event_stream_quickly() {
+    for answers in [true, false] {
+        let (l, addr) = listener().await;
+        let server = tokio::spawn(async move {
+            let mut c = ServerConn::accept(&l, false).await;
+            c.hello(60_000).await;
+            c.recv().await;
+            if answers {
+                while let Some(msg) = c.ws.next().await {
+                    if matches!(msg, Ok(Message::Close(_))) {
+                        break;
+                    }
+                }
+            } else {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        });
+        let (handle, mut rx) = Gateway::spawn(config(addr, false));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let t0 = std::time::Instant::now();
+        handle.close();
+        let ended = timeout(Duration::from_secs(2), async {
+            while rx.recv().await.is_some() {}
+        })
+        .await;
+        assert!(
+            ended.is_ok(),
+            "answers={answers}: stream still open after {:?}",
+            t0.elapsed()
+        );
+        server.abort();
+    }
+}

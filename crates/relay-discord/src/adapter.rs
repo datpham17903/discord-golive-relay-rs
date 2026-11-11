@@ -117,6 +117,9 @@ struct State {
     stream: Option<SourceStream>,
     watch_args: Option<(u64, SourceStream)>,
     vc: Option<VoiceClient>,
+    /// The client being disconnected: it is no longer `vc` (nothing observes it any more) but still
+    /// needs the gateway's voice-state echo that completes its leave.
+    leaving: Option<VoiceClient>,
     vc_pump: Option<JoinHandle<()>>,
     sc: Option<StreamClient>,
     twcc_task: Option<JoinHandle<()>>,
@@ -400,7 +403,10 @@ impl Inner {
             self.emit(event);
         }
         if let Some(event) = link_event(&d.name, &d.data, self.opts.relay_id) {
-            let vc = self.st.lock().vc.clone();
+            let vc = {
+                let st = self.st.lock();
+                st.vc.clone().or_else(|| st.leaving.clone())
+            };
             if let Some(vc) = vc {
                 vc.handle_event(event);
             }
@@ -818,7 +824,7 @@ impl Inner {
             st.vc.take()
         };
         if let Some(stale) = stale {
-            stale.disconnect(LEAVE_TIMEOUT).await;
+            self.disconnect_voice(stale).await;
         }
         let mut rtc = RtcSettings::new(
             self.parent_codec_specs(),
@@ -870,13 +876,20 @@ impl Inner {
         vc.is_some_and(|vc| vc.is_connected())
     }
 
+    /// Disconnects `vc` (already unregistered) while it still receives the dispatches it waits for.
+    async fn disconnect_voice(&self, vc: VoiceClient) {
+        self.st.lock().leaving = Some(vc.clone());
+        vc.disconnect(LEAVE_TIMEOUT).await;
+        self.st.lock().leaving = None;
+    }
+
     async fn leave(&self) -> Result<(), AdapterError> {
         let (vc, pump) = {
             let mut st = self.st.lock();
             (st.vc.take(), st.vc_pump.take())
         };
         if let Some(vc) = vc {
-            vc.disconnect(LEAVE_TIMEOUT).await;
+            self.disconnect_voice(vc).await;
         }
         if let Some(net) = self.net() {
             net.set_rtc_connected(false);

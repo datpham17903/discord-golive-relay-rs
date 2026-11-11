@@ -391,3 +391,71 @@ async fn output_start_fails_when_the_gateway_ends_before_ready() {
     let err = result.expect_err("no READY");
     assert!(!err.to_string().contains(FAKE_TOKEN));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_is_prompt_with_a_live_gateway() {
+    let rest = rest_server(&RELAY.to_string(), 200).await;
+    let (listener, url) = Gateway::bind().await;
+    let (adapter, events, _) = ingest(urls(&rest, &url));
+    adapter.start(Token::new(FAKE_TOKEN)).await.unwrap();
+    let mut gw = Gateway::accept(&listener).await;
+    gw.handshake().await;
+    gw.ready(RELAY).await;
+    until(&events, "the READY snapshot", |e| !e.is_empty()).await;
+
+    let t0 = std::time::Instant::now();
+    adapter.close().await;
+    assert!(
+        t0.elapsed() < Duration::from_secs(1),
+        "close took {:?}",
+        t0.elapsed()
+    );
+}
+
+/// Regression: leaving voice used to wait the full leave timeout because the client being disconnected
+/// was already unregistered and never saw the gateway's "left" voice-state echo.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn leave_completes_on_the_voice_state_echo_not_the_timeout() {
+    let rest = rest_server(&RELAY.to_string(), 200).await;
+    let (listener, url) = Gateway::bind().await;
+    let (adapter, events, _) = ingest(urls(&rest, &url));
+    adapter.start(Token::new(FAKE_TOKEN)).await.unwrap();
+    let mut gw = Gateway::accept(&listener).await;
+    gw.handshake().await;
+    gw.ready(RELAY).await;
+    until(&events, "the READY snapshot", |e| !e.is_empty()).await;
+
+    // Echo every voice-state request (op 4) like Discord does.
+    let echo = tokio::spawn(async move {
+        let mut seq = 10;
+        while let Some(Ok(msg)) = gw.ws.next().await {
+            let Message::Text(text) = msg else { continue };
+            let v: Value = serde_json::from_str(text.as_str()).unwrap();
+            if v["op"] == 4 {
+                seq += 1;
+                gw.dispatch(
+                    seq,
+                    "VOICE_STATE_UPDATE",
+                    json!({"user_id": RELAY.to_string(), "guild_id": GUILD.to_string(),
+                           "channel_id": v["d"]["channel_id"], "session_id": "vs-1"}),
+                )
+                .await;
+            }
+        }
+    });
+
+    let join = adapter.join(None);
+    let (joined, left) = tokio::join!(join, async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let t0 = std::time::Instant::now();
+        adapter.leave().await.unwrap();
+        t0.elapsed()
+    });
+    assert!(
+        joined.is_err(),
+        "no voice server, so the join cannot complete"
+    );
+    assert!(left < Duration::from_secs(2), "leave took {left:?}");
+    adapter.close().await;
+    echo.abort();
+}

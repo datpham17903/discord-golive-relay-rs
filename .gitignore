@@ -2,3 +2,6 @@ target/
 secrets/
 config.yaml
 state/
+
+# Private design notes (kept local, never published)
+docs/

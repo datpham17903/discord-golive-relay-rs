@@ -1260,10 +1260,10 @@ impl Inner {
                 drop(st);
                 self.log(
                     "voice_event",
-                    json!({"event": "Disconnected", "stream_key": key}),
+                    json!({"kind": "Disconnected", "stream_key": key}),
                 );
             }
-            other => self.log("voice_event", json!({"event": format!("{other:?}")})),
+            other => self.log("voice_event", json!({"kind": format!("{other:?}")})),
         }
     }
 }

@@ -555,7 +555,7 @@ impl Inner {
             }
             other => self.log(
                 "voice_event",
-                json!({"account": self.opts.user_id, "event": format!("{other:?}")}),
+                json!({"account": self.opts.user_id, "kind": format!("{other:?}")}),
             ),
         }
     }

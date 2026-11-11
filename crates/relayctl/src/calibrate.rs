@@ -10,10 +10,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 pub const MIN_T_DEAD: f64 = 3.0;
-pub const DEFAULT_MANIFEST: &str = "manifests/verified-capabilities.json";
 
 #[derive(Debug, Args)]
 pub struct CalibrateArgs {
@@ -26,14 +25,12 @@ pub struct CalibrateArgs {
     /// Accept less than --min-minutes of evidence.
     #[arg(long)]
     pub force: bool,
-    /// Update the manifest and --config.
+    /// Update --config.
     #[arg(long, requires = "config")]
     pub write: bool,
     /// Config YAML to update with --write.
     #[arg(long)]
     pub config: Option<PathBuf>,
-    #[arg(long, default_value = DEFAULT_MANIFEST)]
-    pub manifest: PathBuf,
 }
 
 pub fn recommend(observed_max_gap_s: f64) -> f64 {
@@ -131,47 +128,6 @@ fn fmt_g(value: f64) -> String {
     } else {
         value.to_string()
     }
-}
-
-pub fn write_manifest(path: &Path, result: &Aggregate, evidence: &[String]) -> Result<(), String> {
-    let fail = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-    let raw =
-        String::from_utf8(std::fs::read(path).map_err(|e| fail(&e))?).map_err(|e| fail(&e))?;
-    let nl = if raw.contains("\r\n") { "\r\n" } else { "\n" };
-    let mut data: Value = serde_json::from_str(&raw).map_err(|e| fail(&e))?;
-    let t = result.recommended_t_dead_s;
-    let root = data
-        .as_object_mut()
-        .ok_or_else(|| fail(&"not a JSON object"))?;
-    root.get_mut("live")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| fail(&"no \"live\" object"))?
-        .insert("source_dead_timeout_seconds".into(), json!(t));
-    let results = root
-        .entry("live_results")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| fail(&"\"live_results\" is not an object"))?;
-    results.insert(
-        "T_dead".into(),
-        json!({
-            "value_seconds": t,
-            "formula": "max(3.0, round_up(2 x observed_max_gap + 1.0, 0.5))",
-            "observed_max_gap_s": result.observed_max_gap_s,
-            "max_gap_by_kind_s": result.max_gap_by_kind_s,
-            "gap_basis": "conservative max over per-stream max_gap_s (audio/video separately)",
-            "runs": result.runs,
-            "minutes_watched": (result.minutes * 10.0).round() / 10.0,
-            "logs": evidence,
-        }),
-    );
-    let mut out = serde_json::to_string_pretty(&data)
-        .map_err(|e| fail(&e))?
-        .replace('\n', nl);
-    if raw.ends_with('\n') {
-        out.push_str(nl);
-    }
-    std::fs::write(path, out).map_err(|e| fail(&e))
 }
 
 /// `(prefix, value, suffix)` of an indented `source_dead_timeout_seconds:` line.
@@ -298,19 +254,11 @@ pub fn run(args: &CalibrateArgs, out: &mut dyn Write, err: &mut dyn Write) -> i3
         let Some(config) = &args.config else {
             return 1;
         };
-        let evidence: Vec<String> = runs.iter().map(|r| r.path.clone()).collect();
-        let written = write_manifest(&args.manifest, &result, &evidence)
-            .and_then(|()| write_config(config, result.recommended_t_dead_s));
-        if let Err(e) = written {
+        if let Err(e) = write_config(config, result.recommended_t_dead_s) {
             let _ = writeln!(err, "{e}");
             return 1;
         }
-        let _ = writeln!(
-            out,
-            "wrote {} and {}",
-            args.manifest.display(),
-            config.display()
-        );
+        let _ = writeln!(out, "wrote {}", config.display());
     }
     0
 }
@@ -318,6 +266,7 @@ pub fn run(args: &CalibrateArgs, out: &mut dyn Write, err: &mut dyn Write) -> i3
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use serde_json::json;
 
     use super::*;
 
@@ -429,18 +378,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let logp = dir.path().join("a.jsonl");
         log(&logp, 10, 0.1, 1.2);
-        let manifest_src =
-            std::fs::read(Path::new(ROOT).join("manifests/verified-capabilities.json")).unwrap();
-        let manifest = dir.path().join("m.json");
-        std::fs::write(&manifest, &manifest_src).unwrap();
         let cfg_src = std::fs::read_to_string(Path::new(ROOT).join("config.example.yaml")).unwrap();
         let cfg = dir.path().join("c.yaml");
         std::fs::write(&cfg, &cfg_src).unwrap();
-        let (m, c) = (manifest.display().to_string(), cfg.display().to_string());
-        let (code, _) = call(&args(
-            &[&logp],
-            &["--write", "--config", &c, "--manifest", &m],
-        ));
+        let c = cfg.display().to_string();
+        let (code, _) = call(&args(&[&logp], &["--write", "--config", &c]));
         assert_eq!(code, 0);
 
         let new_cfg = std::fs::read_to_string(&cfg).unwrap();
@@ -457,19 +399,5 @@ mod tests {
             diff[0].1.trim(),
             "source_dead_timeout_seconds: 3.5   # must be the value measured in M0 before enabling"
         );
-
-        let old: Value = serde_json::from_slice(&manifest_src).unwrap();
-        let mut new: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        assert_eq!(new["live"]["source_dead_timeout_seconds"], json!(3.5));
-        let observed = new["live_results"]["T_dead"]["observed_max_gap_s"]
-            .as_f64()
-            .unwrap();
-        assert!((observed - 1.2).abs() < 1e-9);
-        new["live"]["source_dead_timeout_seconds"] = Value::Null;
-        new["live_results"]
-            .as_object_mut()
-            .unwrap()
-            .remove("T_dead");
-        assert_eq!(new, old);
     }
 }

@@ -53,7 +53,7 @@ Check the binary and the install (see section 7 for `doctor`):
 ./relayctl doctor --config config.example.yaml
 ```
 
-With the example config, `doctor` also reports capability failures. That is expected until `liveness.source_dead_timeout_seconds` is set (section 6). `doctor` has no encoder or decoder probes in this build: it checks the config, the state directory and the capability manifest only. On Windows, set `storage.state_directory` first (section 5), because `doctor` creates that directory.
+With the example config, `doctor` also reports capability failures. That is expected until `liveness.source_dead_timeout_seconds` is set (section 6). `doctor` has no encoder or decoder probes in this build: it checks the config, and the state directory only. On Windows, set `storage.state_directory` first (section 5), because `doctor` creates that directory.
 
 ### Build from source
 
@@ -144,7 +144,6 @@ relayctl validate --config config.yaml
 | `runtime.relay_idle_stop_seconds` | How long an extra relay's Go Live must have no viewer before it stops | `30` | rarely |
 | `runtime.stream_viewer_cap` | Viewers one Go Live can hold | `50` | only for tests |
 | `liveness.source_dead_timeout_seconds` | Seconds without source packets before the source is treated as dead (`T_dead`) | `null` | set by section 6 (the service refuses to run while `null`) |
-| `liveness.verified_capability_manifest` | Capability file with the measured value | `manifests/verified-capabilities.json` | different location |
 | `storage.state_directory` | Where `state.json`, `status.json` and the control socket live | `/var/lib/discord-relay` | always on Windows (for example `state`) |
 | `logging.level` | `DEBUG` `INFO` `WARNING` `ERROR` `CRITICAL` | `INFO` | debugging |
 | `logging.include_media` | Log media content | `false` | never (must be `false`) |
@@ -157,7 +156,7 @@ relayctl validate --config config.yaml
 | `control.command_cooldown_seconds` | Per-author cooldown for non-operators; `0` turns it off | `5` | rarely |
 | `control.change_cooldown_seconds` | Global cooldown after an applied change; `0` turns it off | `3` | rarely |
 
-Relative manifest paths are looked up next to the config file. `config.example.yaml` is the reference for every key.
+`config.example.yaml` is the reference for every key.
 
 ### Multiple accounts
 
@@ -191,10 +190,10 @@ The relay refuses to run while `liveness.source_dead_timeout_seconds` is `null`.
 ```sh
 relayctl dev watch --config config.yaml --seconds 660 2> tdead.jsonl
 relayctl calibrate-tdead tdead.jsonl                                  # print only
-relayctl calibrate-tdead tdead.jsonl --write --config config.yaml     # update manifest + config
+relayctl calibrate-tdead tdead.jsonl --write --config config.yaml     # update config
 ```
 
-The formula is `max(3.0, round_up(2 x observed_max_gap + 1.0, 0.5))`. The calibration reads the `event: "stats"` log lines (`streams["<ssrc>/<kind>"].max_gap_s`), including logs written by the Python relay. `--write` updates `manifests/verified-capabilities.json` and your config; without it the value is only printed. Keep the same value in `config.yaml`.
+The formula is `max(3.0, round_up(2 x observed_max_gap + 1.0, 0.5))`. The calibration reads the `event: "stats"` log lines (`streams["<ssrc>/<kind>"].max_gap_s`), including logs written by the Python relay. `--write` updates `liveness.source_dead_timeout_seconds` in your config; without it the value is only printed.
 
 Record the results of live runs by hand in `manifests/verified-capabilities.json` under `live_results`.
 
@@ -217,7 +216,7 @@ relayctl run      --config config.yaml
 | Command | What it does |
 | --- | --- |
 | `relayctl validate --config FILE` | Checks the config. No Discord connection. Prints `config valid`, then one `not operable: ...` line per reason the service would refuse to run (null `T_dead`). Exit 1 on an invalid config. |
-| `relayctl doctor --config FILE` | Checks the config, state directory and capability manifest. Never publishes. No encoder or decoder probes. Exit 1 if any check fails. |
+| `relayctl doctor --config FILE` | Checks the config and state directory. Never publishes. No encoder or decoder probes. Exit 1 if any check fails. |
 | `relayctl run --config FILE [--metrics-listen IP:PORT]` | Runs the service. Exit 78 means a config or credential problem (no automatic restart under systemd). Starts disabled on first run. `--metrics-listen`: see Monitoring below. |
 | `relayctl status [--state-dir DIR]` | Shows state, enabled flag, FATAL, quarantine, profile. Asks the running service, else reads `status.json` or `state.json`. |
 | `relayctl enable [--state-dir DIR]` | Sets `desired_enabled=true`. Does not clear FATAL or quarantine. |
@@ -275,14 +274,13 @@ useradd --system --home /opt/discord-relay --shell /usr/sbin/nologin discord-rel
 install -d /opt/discord-relay
 install -m 0755 relayctl /opt/discord-relay/relayctl
 
-install -d -m 0750 -o root -g discord-relay /etc/discord-relay /etc/discord-relay/manifests
+install -d -m 0750 -o root -g discord-relay /etc/discord-relay
 install -m 0640 -g discord-relay config.yaml /etc/discord-relay/config.yaml
-install -m 0640 -g discord-relay manifests/verified-capabilities.json /etc/discord-relay/manifests/
 install -m 0600 secrets/relay-token   /etc/discord-relay/token
 install -m 0600 secrets/relay-token-2 /etc/discord-relay/token-2
 ```
 
-The manifests go in `/etc/discord-relay/manifests/` because relative paths in the config are resolved next to the config file. The config should keep `storage.state_directory: /var/lib/discord-relay` (the unit's `StateDirectory=discord-relay`).
+The config should keep `storage.state_directory: /var/lib/discord-relay` (the unit's `StateDirectory=discord-relay`).
 
 The unit has one `LoadCredential` line for the ingest token. Add one line per output account, with the credential name from `relay_accounts` or `mirror_accounts` on the left:
 

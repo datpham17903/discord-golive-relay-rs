@@ -461,21 +461,8 @@ fn load(path: &Path, ctx: &mut Ctx<'_>) -> Option<RelayConfig> {
     }
 }
 
-/// Manifests are looked up next to the config file unless `name` is absolute.
-fn manifest(cfg_path: &Path, name: &str) -> Result<Value, String> {
-    let mut p = PathBuf::from(name);
-    if !p.is_absolute() {
-        p = cfg_path.parent().unwrap_or(Path::new("")).join(p);
-    }
-    let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-    serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))
-}
-
-fn operable_errors(cfg: &RelayConfig, cfg_path: &Path) -> Vec<String> {
-    match manifest(cfg_path, &cfg.liveness.verified_capability_manifest) {
-        Ok(cap) => check_operable(cfg, &cap),
-        Err(e) => vec![format!("manifest: {e}")],
-    }
+fn operable_errors(cfg: &RelayConfig) -> Vec<String> {
+    check_operable(cfg)
 }
 
 fn validate(cfg_path: &Path, ctx: &mut Ctx<'_>) -> i32 {
@@ -493,7 +480,7 @@ fn validate(cfg_path: &Path, ctx: &mut Ctx<'_>) -> i32 {
     for note in ignored_setting_notes(&cfg) {
         ctx.say(&note);
     }
-    for p in operable_errors(&cfg, cfg_path) {
+    for p in operable_errors(&cfg) {
         ctx.say(&format!("not operable: {p}"));
     }
     EXIT_OK
@@ -575,7 +562,7 @@ fn doctor(cfg_path: &Path, ctx: &mut Ctx<'_>) -> i32 {
         ),
         Err(e) => report(ctx, "state directory writable", false, &e.to_string()),
     }
-    for p in operable_errors(&cfg, cfg_path) {
+    for p in operable_errors(&cfg) {
         report(ctx, "capability", false, &p);
     }
     if failed { EXIT_FAIL } else { EXIT_OK }
@@ -701,7 +688,7 @@ fn run_relay(args: &RunArgs, ctx: &mut Ctx<'_>) -> i32 {
             return EXIT_CONFIG;
         }
     };
-    let problems = operable_errors(&cfg, cfg_path);
+    let problems = operable_errors(&cfg);
     if !problems.is_empty() {
         for p in problems {
             ctx.warn(&format!("not operable: {p}"));

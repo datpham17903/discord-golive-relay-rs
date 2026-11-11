@@ -80,10 +80,6 @@ fn example() -> RelayConfig {
     load_config(&example_path()).unwrap()
 }
 
-fn manifests() -> Value {
-    json!({"live": {"source_dead_timeout_seconds": 5}})
-}
-
 fn pairs(accounts: &[relay_core::config::OutputAccount]) -> Vec<(u64, &str)> {
     accounts
         .iter()
@@ -264,7 +260,7 @@ fn test_errors_are_collected() {
 #[test]
 fn test_check_operable_null_timeout() {
     let cfg = example();
-    let errs = check_operable(&cfg, &manifests());
+    let errs = check_operable(&cfg);
     assert!(any_err(&errs, "source_dead_timeout_seconds"));
 }
 
@@ -278,7 +274,7 @@ fn operable_cfg(tmp: &Path) -> RelayConfig {
 fn test_check_operable_ok() {
     let tmp = tempdir().unwrap();
     let cfg = operable_cfg(tmp.path());
-    assert_eq!(check_operable(&cfg, &manifests()), Vec::<String>::new());
+    assert_eq!(check_operable(&cfg), Vec::<String>::new());
 }
 
 #[test]
@@ -288,22 +284,11 @@ fn test_check_operable_ignores_missing_profile_manifest() {
     r["liveness"]["source_dead_timeout_seconds"] = json!(5);
     r["quality"]["approved_profile_manifest"] = json!("/nonexistent/verified-profiles.json");
     let cfg = load_ok(tmp.path(), &r);
-    assert_eq!(check_operable(&cfg, &manifests()), Vec::<String>::new());
+    assert_eq!(check_operable(&cfg), Vec::<String>::new());
     assert!(any_err(
         &ignored_setting_notes(&cfg),
         "approved_profile_manifest"
     ));
-}
-
-#[test]
-fn test_check_operable_malformed_capability_live() {
-    let tmp = tempdir().unwrap();
-    let cfg = operable_cfg(tmp.path());
-    for cap_live in [Value::Null, json!("x"), json!([])] {
-        let mut cap = manifests();
-        cap["live"] = cap_live;
-        assert!(any_err(&check_operable(&cfg, &cap), "capability manifest"));
-    }
 }
 
 #[test]
@@ -983,7 +968,7 @@ fn test_check_operable_ok_while_ingest_id_unresolved() {
     del(&mut r, "discord", "expected_relay_user_id");
     r["liveness"]["source_dead_timeout_seconds"] = json!(5);
     let cfg = load_ok(tmp.path(), &r);
-    assert_eq!(check_operable(&cfg, &manifests()), Vec::<String>::new());
+    assert_eq!(check_operable(&cfg), Vec::<String>::new());
 }
 
 #[test]
@@ -1043,8 +1028,7 @@ fn test_check_operable_rejects_transcode_modes() {
         r["liveness"]["source_dead_timeout_seconds"] = json!(5);
         r["codecs"][key] = json!("transcode");
         let cfg = load_ok(tmp.path(), &r);
-        let cap = manifests();
-        let errs = check_operable(&cfg, &cap);
+        let errs = check_operable(&cfg);
         assert!(
             errs.iter()
                 .any(|e| e.contains(name) && e.contains("transcode not supported in this build")),
@@ -1054,7 +1038,7 @@ fn test_check_operable_rejects_transcode_modes() {
         del(&mut r, "discord", "expected_relay_user_id");
         let cfg = load_ok(tmp.path(), &r);
         assert!(any_err(
-            &check_operable(&cfg, &cap),
+            &check_operable(&cfg),
             "transcode not supported in this build"
         ));
     }

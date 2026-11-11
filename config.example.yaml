@@ -64,7 +64,6 @@ runtime:
 
 liveness:
   source_dead_timeout_seconds: null   # must be the value measured in M0 before enabling
-  verified_capability_manifest: "manifests/verified-capabilities.json"
 
 storage:
   state_directory: "/var/lib/discord-relay"

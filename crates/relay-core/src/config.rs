@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use saphyr::{LoadableYamlNode, Yaml};
-use serde_json::Value;
 
 pub const MAX_INPUT_PIXELS: u64 = 3840 * 2160; // decode guard; not configurable in v1
 pub const VIDEO_ENCODERS: &[&str] = &[
@@ -256,7 +255,6 @@ pub struct RuntimeConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LivenessConfig {
     pub source_dead_timeout_seconds: Option<f64>,
-    pub verified_capability_manifest: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1190,8 +1188,11 @@ fn build(raw: Option<&Yaml>, errors: &Errors, warnings: &mut Vec<String>) -> Opt
     let mut r = Reader::new("liveness", section, errors);
     let liveness = LivenessConfig {
         source_dead_timeout_seconds: r.num("source_dead_timeout_seconds", true),
-        verified_capability_manifest: r.str_("verified_capability_manifest", None),
     };
+    // Accepted for configs that still set it; no capability manifest is read.
+    if r.has("verified_capability_manifest") {
+        r.str_("verified_capability_manifest", None);
+    }
     r.finish();
 
     let section = top.get("storage");
@@ -1431,23 +1432,13 @@ pub fn apply_account_ids(
 }
 
 /// Return reasons the service must not run yet; an empty list means it may.
-pub fn check_operable(cfg: &RelayConfig, capability_manifest: &Value) -> Vec<String> {
+pub fn check_operable(cfg: &RelayConfig) -> Vec<String> {
     let mut errors = Vec::new();
     if cfg.liveness.source_dead_timeout_seconds.is_none() {
         errors.push(
             "liveness.source_dead_timeout_seconds: must be the value measured in M0 (is null)"
                 .to_string(),
         );
-    } else {
-        let live = capability_manifest.get("live").filter(|v| v.is_object());
-        if live
-            .and_then(|l| l.get("source_dead_timeout_seconds"))
-            .is_none_or(Value::is_null)
-        {
-            errors.push(
-                "capability manifest: live.source_dead_timeout_seconds is not measured".to_string(),
-            );
-        }
     }
     // This build cannot encode, so a transcode mode can never run.
     if cfg.codecs.video_mode == VideoMode::Transcode {

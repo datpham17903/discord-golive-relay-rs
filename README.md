@@ -39,6 +39,10 @@ Download the archive for your platform from the GitHub Releases page and unpack 
 | Linux x86_64 | `relayctl-<tag>-x86_64-unknown-linux-gnu.tar.gz` |
 | Windows x86_64 | `relayctl-<tag>-x86_64-pc-windows-msvc.zip` |
 | macOS Apple Silicon | `relayctl-<tag>-aarch64-apple-darwin.tar.gz` |
+| Linux arm64 (experimental) | `relayctl-<tag>-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux x86_64 static musl (experimental) | `relayctl-<tag>-x86_64-unknown-linux-musl.tar.gz` |
+
+Every archive has a `<archive>.sha256` file next to it (`sha256sum -c <archive>.sha256`, or `shasum -a 256 -c` on macOS). The experimental builds may be missing from a release if their CI job failed.
 
 Each archive holds `relayctl` (`relayctl.exe` on Windows), `config.example.yaml`, `manifests/`, `README.md`, `LICENSE` and `NOTICE`. You need outbound UDP and TCP to Discord (voice uses UDP).
 
@@ -374,7 +378,7 @@ Run the tests (no Discord needed):
 cargo test --workspace
 ```
 
-Pushing a tag `v*` builds `relayctl` for `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc` and `aarch64-apple-darwin` and attaches the archives to a GitHub Release.
+Pushing a tag `v*` builds `relayctl` for `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc` and `aarch64-apple-darwin` (plus the experimental `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-musl`, whose failure does not block the release) and attaches the archives and their `.sha256` files to a GitHub Release.
 
 ## License
 

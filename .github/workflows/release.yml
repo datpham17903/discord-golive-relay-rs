@@ -14,6 +14,8 @@ jobs:
   build:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # Experimental targets may fail without blocking the other artifacts or the release.
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
@@ -22,13 +24,26 @@ jobs:
           # Ubuntu 22.04+ (ubuntu-latest links against glibc 2.39 symbols).
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            experimental: false
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            experimental: false
           - os: macos-latest
             target: aarch64-apple-darwin
+            experimental: false
+          # Native arm64 runner, same steps as x86_64 Linux (glibc 2.35).
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            experimental: true
+          # Static binary, built inside the official Alpine Rust image (musl gcc/g++ for BoringSSL).
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            experimental: true
+            musl: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
+        if: ${{ !matrix.musl }}
         with:
           toolchain: "1.98.0"
           targets: ${{ matrix.target }}
@@ -37,7 +52,7 @@ jobs:
           key: ${{ matrix.target }}
       # wreq -> btls-sys builds BoringSSL: needs cmake, NASM (Windows) and libclang (bindgen).
       - name: Native build deps (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !matrix.musl
         run: sudo apt-get update && sudo apt-get install -y cmake libclang-dev
       - name: Native build deps (macOS)
         if: runner.os == 'macOS'
@@ -50,7 +65,15 @@ jobs:
           "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Build
+        if: ${{ !matrix.musl }}
         run: cargo build --release -p relayctl --target ${{ matrix.target }}
+      - name: Build (static musl, Alpine container)
+        if: ${{ matrix.musl }}
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src rust:1.98.0-alpine sh -euc '
+            apk add --no-cache build-base cmake perl clang-dev llvm-dev linux-headers git
+            cargo build --release -p relayctl --target ${{ matrix.target }}'
+          sudo chown -R "$(id -u):$(id -g)" target
       - name: Package (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -73,7 +96,22 @@ jobs:
           Remove-Item "dist/$name/manifests/verified-profiles.json" -ErrorAction SilentlyContinue
           Compress-Archive -Path "dist/$name" -DestinationPath "$name.zip"
           "ASSET=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Checksum (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null; then sha256sum "$ASSET" > "$ASSET.sha256"; else shasum -a 256 "$ASSET" > "$ASSET.sha256"; fi
+          cat "$ASSET.sha256"
+      - name: Checksum (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 $env:ASSET).Hash.ToLower()
+          "$hash  $env:ASSET" | Out-File -FilePath "$env:ASSET.sha256" -Encoding ascii
+          Get-Content "$env:ASSET.sha256"
       - uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.ASSET }}
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
           prerelease: ${{ contains(github.ref_name, '-') }}

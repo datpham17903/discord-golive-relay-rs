@@ -116,7 +116,8 @@ impl SupervisorConfig {
             retry_jitter: 0.2,
             rejection_limit: 3,
             paused_capability_verified: false,
-            keyframe_methods: vec![KeyframeMethod::Pli, KeyframeMethod::Rewatch],
+            // No rewatch by default: dropping the watch of a full stream gives its slot away.
+            keyframe_methods: vec![KeyframeMethod::Pli],
             keyframe_step_seconds: 3.0,
             prejoin_voice: false,
             watch_retry_interval: 1.0,
@@ -1270,6 +1271,20 @@ impl Supervisor {
             });
         }
         if self.hold_deadline.is_some_and(|d| now >= d) {
+            // Media still flows and only a keyframe is missing: the watch holds a viewer slot a
+            // full stream may not give back, so keep it and start the keyframe recovery over.
+            // Any other failed clause (relay voice, ownership, rtc) still tears down and
+            // reconnects.
+            let failed = evaluate_gate(&self.facts(now)).failed;
+            if self.liveness.state(now) == Liveness::Live
+                && failed.iter().all(|c| *c == "decodable_frame")
+            {
+                self.hold_deadline = Some(now + self.cfg.hold_timeout);
+                self.kf_idx = 0;
+                self.kf_last = None;
+                self.recover(now, acts);
+                return;
+            }
             self.stop(StopReason::HoldExpired, now, acts, StopOpts::default());
             self.backoff(now, acts);
             return;
@@ -1315,6 +1330,14 @@ impl Supervisor {
             });
             self.kf_last = Some(now);
             return;
+        }
+        // Every step was tried: while media still arrives, keep asking for a keyframe each step.
+        if methods.contains(&KeyframeMethod::Pli) && self.liveness.state(now) == Liveness::Live {
+            acts.push(Action::RequestInputKeyframe {
+                generation: self.generation,
+                method: KeyframeMethod::Pli,
+            });
+            self.kf_last = Some(now);
         }
     }
 }

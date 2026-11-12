@@ -911,7 +911,10 @@ fn test_a25_worker_crash_holds_with_new_epoch_and_recovers() {
 
 #[test]
 fn test_keyframe_recovery_order_pli_rewatch_wait() {
-    let mut sup = make_cfg(|c| c.keyframe_step_seconds = 3.0);
+    let mut sup = make_cfg(|c| {
+        c.keyframe_step_seconds = 3.0;
+        c.keyframe_methods = vec![KeyframeMethod::Pli, KeyframeMethod::Rewatch];
+    });
     let (g, e) = relaying(&mut sup, 0.0);
     let acts = sup.handle(worker_failed(g, e), 2.0);
     let methods: Vec<KeyframeMethod> = acts
@@ -936,6 +939,43 @@ fn test_keyframe_recovery_order_pli_rewatch_wait() {
         &tick(&mut sup, 17.0),
         StopReason::HoldExpired
     ));
+}
+
+#[test]
+fn test_default_recovery_repeats_pli_and_never_rewatches() {
+    let mut sup = make_cfg(|c| c.keyframe_step_seconds = 3.0);
+    let (g, e) = relaying(&mut sup, 0.0);
+    let acts = sup.handle(worker_failed(g, e), 2.0);
+    assert!(has_keyframe(&acts, KeyframeMethod::Pli));
+    for t in [5.0, 8.0, 11.0, 14.0] {
+        sup.handle(progress(g, t - 0.1), t - 0.1);
+        let acts = tick(&mut sup, t);
+        assert!(has_keyframe(&acts, KeyframeMethod::Pli), "t={t}");
+        assert!(!has_keyframe(&acts, KeyframeMethod::Rewatch), "t={t}");
+    }
+}
+
+#[test]
+fn test_hold_deadline_with_live_source_keeps_the_session() {
+    let mut sup = make_cfg(|c| c.keyframe_step_seconds = 3.0);
+    let (g, e) = relaying(&mut sup, 0.0);
+    sup.handle(worker_failed(g, e), 2.0);
+    for t in [5.0, 8.0, 11.0, 14.0] {
+        sup.handle(progress(g, t - 0.1), t - 0.1);
+        tick(&mut sup, t);
+    }
+    sup.handle(progress(g, 16.9), 16.9);
+    let acts = tick(&mut sup, 17.0);
+    assert!(!has_teardown_reason(&acts, StopReason::HoldExpired));
+    assert!(has_keyframe(&acts, KeyframeMethod::Pli));
+    let st = sup.status(17.0);
+    assert_eq!(st.state, RelayState::Hold);
+    assert_eq!(st.hold_deadline, Some(32.0));
+    // still only PLI, never a rewatch
+    sup.handle(progress(g, 19.9), 19.9);
+    let acts = tick(&mut sup, 20.0);
+    assert!(has_keyframe(&acts, KeyframeMethod::Pli));
+    assert!(!has_keyframe(&acts, KeyframeMethod::Rewatch));
 }
 
 #[test]

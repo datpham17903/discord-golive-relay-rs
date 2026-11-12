@@ -985,6 +985,11 @@ impl Inner {
     }
 
     async fn stop_watch(&self) -> Result<(), AdapterError> {
+        self.stop_watch_waiting(None).await
+    }
+
+    /// `echo_wait`: also wait that long for Discord's STREAM_DELETE echo of the stopped watch.
+    async fn stop_watch_waiting(&self, echo_wait: Option<Duration>) -> Result<(), AdapterError> {
         let (sc, task) = {
             let mut st = self.st.lock();
             (st.sc.take(), st.twcc_task.take())
@@ -999,7 +1004,10 @@ impl Inner {
         }
         if let Some(sc) = sc {
             sc.stop_listening();
-            sc.disconnect().await;
+            match echo_wait {
+                Some(wait) => sc.disconnect_awaiting_echo(wait).await,
+                None => sc.disconnect().await,
+            }
         }
         Ok(())
     }
@@ -1009,7 +1017,9 @@ impl Inner {
         let Some((generation, stream)) = args else {
             return Err(AdapterError::failed("no watch to renew"));
         };
-        self.stop_watch().await?;
+        // A stale STREAM_DELETE echo landing after the new watch starts would reject it.
+        let echo_wait = self.opts.connect_timeout.min(Duration::from_secs(2));
+        self.stop_watch_waiting(Some(echo_wait)).await?;
         let epoch = self.hot.lock().epoch;
         self.watch(generation, epoch, stream).await
     }

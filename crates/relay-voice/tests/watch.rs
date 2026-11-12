@@ -823,6 +823,49 @@ async fn test_stream_delete_before_create_rejects_the_watch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_stale_stream_delete_echo_does_not_reject_the_rewatch() {
+    let stream_rtc = start_rtc(OWN_STREAM_SSRC, Some(video_message())).await;
+    let rig = rig(StreamAnswer::Create {
+        endpoint: stream_rtc.endpoint.clone(),
+    })
+    .await;
+    rig.join().await;
+    let stream = rig
+        .client
+        .watch_stream(&stream_key(), watch_settings(), WAIT)
+        .await
+        .expect("first watch");
+    // Discord echoes our op 19 back a little later
+    let (client, seen) = (rig.client.clone(), Arc::clone(&rig.seen));
+    tokio::spawn(async move {
+        while !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.starts_with("stream_delete:"))
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        client.handle_event(LinkEvent::StreamDelete(StreamDelete {
+            stream_key: stream_key(),
+            reason: "user_requested".into(),
+            unavailable: false,
+        }));
+    });
+    let started = std::time::Instant::now();
+    stream.disconnect_awaiting_echo(WAIT).await;
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    let again = rig
+        .client
+        .watch_stream(&stream_key(), watch_settings(), WAIT)
+        .await
+        .expect("the stale echo must not reject the new watch");
+    again.disconnect().await;
+    rig.client.disconnect(WAIT).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_silent_gateway_times_out_the_watch() {
     let rig = rig(StreamAnswer::Silent).await;
     rig.join().await;

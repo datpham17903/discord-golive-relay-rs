@@ -623,6 +623,27 @@ impl StreamClient {
         self.inner.teardown(true).await;
     }
 
+    /// [`disconnect`](Self::disconnect), then waits up to `wait` for the STREAM_DELETE echo of
+    /// this key, so a late echo cannot be read as the rejection of a watch started right after.
+    /// No echo within `wait` is not an error.
+    pub async fn disconnect_awaiting_echo(&self, wait: Duration) {
+        let vc = self.inner.vc.upgrade();
+        if let Some(vc) = &vc {
+            vc.state.lock().stream_deleted.remove(&self.inner.key);
+        }
+        self.inner.teardown(true).await;
+        if let Some(vc) = vc {
+            let key = self.inner.key.clone();
+            let _ = vc
+                .wait_for(
+                    Instant::now() + wait,
+                    "waiting for the stream delete echo",
+                    |st| st.stream_deleted.contains_key(&key).then_some(()),
+                )
+                .await;
+        }
+    }
+
     /// We created this stream and may send media on it.
     pub fn is_owner(&self) -> bool {
         self.inner.own

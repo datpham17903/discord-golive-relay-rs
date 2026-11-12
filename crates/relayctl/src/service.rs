@@ -1314,12 +1314,17 @@ impl Service {
                 json!({"generation": generation, "detail": truncate(detail, 300)}),
             );
         }
-        let (before, acts, after, stream) = {
+        let (before, acts, after, stream, hold) = {
             let mut sup = self.sup.lock();
             let before = sup.state();
             let acts = sup.handle(event.clone(), now);
             let stream = sup.stream().map(|s| (s.key.clone(), s.incarnation));
-            (before, acts, sup.state(), stream)
+            let after = sup.state();
+            let hold = (after == RelayState::Hold && before != after).then(|| {
+                let s = sup.status(now);
+                (s.hold_reason, s.gate_failed)
+            });
+            (before, acts, after, stream, hold)
         };
         if let Some(s) = stream
             && c.seen_stream.as_ref() != Some(&s)
@@ -1339,10 +1344,18 @@ impl Service {
             c.metrics.inc(&format!("event.{}", event_name(&event)), 1);
         }
         if before != after {
-            self.log(
-                "state",
-                json!({"old": before.as_str(), "new": after.as_str()}),
-            );
+            let mut fields = json!({"old": before.as_str(), "new": after.as_str()});
+            if let Some((hold_reason, gate_failed)) = hold {
+                fields["hold_reason"] = json!(hold_reason);
+                fields["gate_failed"] = json!(gate_failed);
+                // receive counters (decrypt/depacketize failures) tell a source fault from ours
+                if c.network_stats
+                    && let Some(a) = &c.adapter
+                {
+                    fields["network"] = a.network_stats();
+                }
+            }
+            self.log("state", fields);
         }
         self.execute_locked(c, acts);
         if self.adaptive {

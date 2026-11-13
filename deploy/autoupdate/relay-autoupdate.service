@@ -1,0 +1,8 @@
+[Unit]
+Description=Install the latest relayctl release (relay restarts itself when idle)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/relay-autoupdate

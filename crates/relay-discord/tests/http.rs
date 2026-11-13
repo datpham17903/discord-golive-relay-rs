@@ -334,6 +334,7 @@ async fn rest_for(server: &MockServer) -> RestClient {
     RestClient::new(urls_for(server), Token::new(FAKE_TOKEN))
         .await
         .unwrap()
+        .with_request_timeout(None)
 }
 
 fn count(requests: &[wiremock::Request], p: &str) -> usize {

@@ -37,6 +37,11 @@ fn snowflake<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<u64, D::Err
     }
 }
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// A 429 asking to wait longer than this is returned as an error instead of slept through.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
 /// `ContextProperties.from_chat_input()`: base64 of `{"location":"Chat Input"}`.
 const CHAT_INPUT_CONTEXT: &str = "eyJsb2NhdGlvbiI6IkNoYXQgSW5wdXQifQ==";
 
@@ -55,6 +60,7 @@ pub struct RestClient {
     ctx: Arc<HeadersContext>,
     urls: Urls,
     token: Token,
+    request_timeout: Option<Duration>,
 }
 
 impl fmt::Debug for RestClient {
@@ -72,19 +78,36 @@ impl RestClient {
     /// browser-emulating client. A plain client does the bootstrap requests, like the Python
     /// library's `aiohttp` session.
     pub async fn new(urls: Urls, token: Token) -> Result<Self> {
-        let bootstrap = wreq::Client::builder().build()?;
+        let bootstrap = wreq::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()?;
         let ctx = HeadersContext::fetch_default(&bootstrap, &urls).await;
         Self::with_context(urls, token, Arc::new(ctx))
     }
 
     pub fn with_context(urls: Urls, token: Token, ctx: Arc<HeadersContext>) -> Result<Self> {
-        let http = wreq::Client::builder().emulation(ctx.emulation()).build()?;
+        // Only a connect timeout on the client: it is shared with the long-lived gateway websocket.
+        // REST requests get their own total timeout in `request`.
+        let http = wreq::Client::builder()
+            .emulation(ctx.emulation())
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()?;
         Ok(Self {
             http,
             ctx,
             urls,
             token,
+            request_timeout: Some(REQUEST_TIMEOUT),
         })
+    }
+
+    /// Total timeout of one REST request (`None`: none). Tests on a paused clock need `None`: their
+    /// timers would otherwise fire while the socket is still pending.
+    #[must_use]
+    pub fn with_request_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 
     /// The emulating client, shared with the gateway so both present the same TLS/HTTP fingerprint.
@@ -214,6 +237,12 @@ impl RestClient {
             } else {
                 Duration::from_secs(1 + 2 * u64::from(attempt - 1))
             };
+            if delay > MAX_RETRY_AFTER {
+                return Err(Error::Status {
+                    status,
+                    message: format!("rate limited, retry_after {delay:?} exceeds the cap"),
+                });
+            }
             tokio::time::sleep(delay).await;
         }
     }
@@ -225,6 +254,9 @@ impl RestClient {
         auth.set_sensitive(true);
 
         let mut req = self.http.request(method, url);
+        if let Some(timeout) = self.request_timeout {
+            req = req.timeout(timeout);
+        }
         for (k, v) in self.ctx.client_hints() {
             req = req.header(k, v);
         }

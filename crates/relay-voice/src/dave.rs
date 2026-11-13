@@ -419,6 +419,9 @@ impl Inner {
 
     /// `reinit_dave_session`.
     fn reinit_session(&mut self) -> Result<Vec<DaveOut>, DaveError> {
+        // Transitions announced for the old session can never complete on the new one.
+        self.pending.clear();
+        self.downgraded = false;
         if let Some(version) = NonZeroU16::new(self.protocol_version) {
             let (user_id, group_id) = (self.user_id, self.group_id);
             match self.session.as_mut() {

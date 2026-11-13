@@ -131,6 +131,8 @@ struct State {
     /// Stream key and generation of an adaptive output: op 14 of that stream becomes `CodecChanged`.
     codec_hook: Option<(String, u64)>,
     last_vsu_session: Option<String>,
+    /// READY arrived while the configured guild was unavailable; GUILD_CREATE completes it.
+    ready_pending_guild: bool,
     pump: Option<JoinHandle<()>>,
     /// Rate limits of `repair_receive`.
     last_reconnect: Option<Instant>,
@@ -426,16 +428,23 @@ impl Inner {
                 }
                 _ => {}
             },
+            "GUILD_CREATE" => {
+                let guild = d.data.get("id").and_then(snowflake);
+                if guild == Some(self.opts.guild_id)
+                    && std::mem::take(&mut self.st.lock().ready_pending_guild)
+                {
+                    self.on_ready(&mut out);
+                }
+            }
             "VOICE_STATE_UPDATE" => {
                 own_observed = self.on_own_voice_state(d);
-                if let Some(CacheChange::Voice {
-                    user_id,
-                    before,
-                    after,
-                    ..
-                }) = &d.change
-                {
-                    self.on_voice_state(*user_id, *before, *after, &mut out);
+                if let Some(change) = &d.change {
+                    self.on_voice_change(change, &mut out);
+                }
+            }
+            "PASSIVE_UPDATE_V2" => {
+                if let Some(change) = &d.change {
+                    self.on_voice_change(change, &mut out);
                 }
             }
             "MESSAGE_CREATE" => self.on_message(&d.data, &mut out),
@@ -671,6 +680,26 @@ impl Inner {
         out.push(model(Event::StreamStarted { stream: source }));
     }
 
+    /// Voice changes of the configured guild only: the target may sit in other guilds too.
+    fn on_voice_change(&self, change: &CacheChange, out: &mut Vec<AdapterEvent>) {
+        match change {
+            CacheChange::Voice {
+                guild_id,
+                user_id,
+                before,
+                after,
+            } if *guild_id == Some(self.opts.guild_id) => {
+                self.on_voice_state(*user_id, *before, *after, out);
+            }
+            CacheChange::Batch(changes) => {
+                for change in changes {
+                    self.on_voice_change(change, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn on_voice_state(
         &self,
         user_id: u64,
@@ -715,6 +744,12 @@ impl Inner {
             out.push(model(Event::ConfigInvalid {
                 detail: "logged-in account is not discord.expected_relay_user_id".into(),
             }));
+            return;
+        }
+        // Unavailable (e.g. during a re-IDENTIFY) is not misconfiguration: GUILD_CREATE re-checks.
+        let available = self.cache.read().guild_available(self.opts.guild_id);
+        self.st.lock().ready_pending_guild = !available;
+        if !available {
             return;
         }
         if !self

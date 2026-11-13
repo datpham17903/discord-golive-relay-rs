@@ -631,7 +631,7 @@ fn positive_number(v: &Yaml) -> Option<f64> {
         (None, Some(f)) => f,
         (None, None) => return None,
     };
-    (n > 0.0).then_some(n)
+    (n.is_finite() && n > 0.0).then_some(n)
 }
 
 fn key_label(k: &Yaml) -> String {

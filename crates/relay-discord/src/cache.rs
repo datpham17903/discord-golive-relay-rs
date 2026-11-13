@@ -190,6 +190,8 @@ pub enum CacheChange {
         before: Option<VoiceStateEntry>,
         after: VoiceStateEntry,
     },
+    /// Several changes from one dispatch (`PASSIVE_UPDATE_V2`: voice changes only).
+    Batch(Vec<CacheChange>),
     Stream {
         key: StreamKey,
         before: Option<StreamState>,
@@ -270,6 +272,11 @@ impl Cache {
 
     pub fn has_guild(&self, guild_id: u64) -> bool {
         self.guilds.contains_key(&guild_id)
+    }
+
+    /// Known and not flagged unavailable (READY/GUILD_DELETE `unavailable`).
+    pub fn guild_available(&self, guild_id: u64) -> bool {
+        self.guilds.get(&guild_id).is_some_and(|g| !g.unavailable)
     }
 
     pub fn guild_ids(&self) -> impl Iterator<Item = u64> + '_ {
@@ -357,7 +364,7 @@ impl Cache {
             "GUILD_CREATE" => self.on_guild_create(data),
             "GUILD_DELETE" => self.on_guild_delete(data),
             "VOICE_STATE_UPDATE" => return self.on_voice_state_update(data),
-            "PASSIVE_UPDATE_V2" => self.on_passive_update_v2(data),
+            "PASSIVE_UPDATE_V2" => return self.on_passive_update_v2(data),
             "CHANNEL_CREATE" | "CHANNEL_UPDATE" => self.on_channel_upsert(data),
             "CHANNEL_DELETE" => self.on_channel_delete(data),
             "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" => self.on_role_upsert(data),
@@ -647,22 +654,31 @@ impl Cache {
         })
     }
 
-    fn on_passive_update_v2(&mut self, data: &Value) {
-        let Some(guild) = data
-            .get("guild_id")
-            .and_then(snowflake)
-            .and_then(|id| self.guilds.get_mut(&id))
-        else {
-            return;
+    /// The voice changes come back as one [`CacheChange::Batch`] (None when nothing changed).
+    fn on_passive_update_v2(&mut self, data: &Value) -> Option<CacheChange> {
+        let guild_id = data.get("guild_id").and_then(snowflake)?;
+        let guild = self.guilds.get_mut(&guild_id)?;
+        let left = VoiceStateEntry {
+            channel_id: None,
+            self_stream: false,
+            self_video: false,
         };
+        let mut changes = Vec::new();
         for user_id in data
             .get("removed_voice_states")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
         {
-            if let Some(user_id) = snowflake(user_id) {
-                guild.voice_states.remove(&user_id);
+            if let Some(user_id) = snowflake(user_id)
+                && let Some(before) = guild.voice_states.remove(&user_id)
+            {
+                changes.push(CacheChange::Voice {
+                    guild_id: Some(guild_id),
+                    user_id,
+                    before: Some(before),
+                    after: left,
+                });
             }
         }
         for vs in data
@@ -674,11 +690,20 @@ impl Cache {
             let Some(user_id) = vs.get("user_id").and_then(snowflake) else {
                 continue;
             };
-            match parse_joined_voice_state(vs) {
-                Some((_, entry)) => guild.voice_states.insert(user_id, entry),
-                None => guild.voice_states.remove(&user_id),
+            let (before, after) = match parse_joined_voice_state(vs) {
+                Some((_, entry)) => (guild.voice_states.insert(user_id, entry), entry),
+                None => (guild.voice_states.remove(&user_id), left),
             };
+            if before.is_some() || after.channel_id.is_some() {
+                changes.push(CacheChange::Voice {
+                    guild_id: Some(guild_id),
+                    user_id,
+                    before,
+                    after,
+                });
+            }
         }
+        (!changes.is_empty()).then_some(CacheChange::Batch(changes))
     }
 
     fn on_stream_create(&mut self, data: &Value) -> Option<CacheChange> {

@@ -14,6 +14,9 @@ use indexmap::IndexMap;
 use relay_media::codec::{CODEC_ORDER, UnknownCodec, down_from, lowest, rank};
 
 const NEVER: f64 = f64::NEG_INFINITY;
+/// Live must persist this long before the forced codec is released, and a release blocks
+/// re-forcing for the same time, so a flapping hold does not flip the codec every second.
+const LIVE_STABLE_S: f64 = 5.0;
 
 type Codecs = &'static [&'static str];
 
@@ -70,6 +73,8 @@ pub enum CodecAction {
 struct Out {
     reported: String,
     offer_top: String,
+    /// The offer before the last emitted `UpdateOutput`; restored if that action fails.
+    prev_offer: String,
     requested: Option<Codecs>,
     bound: Option<String>,
     /// A raised offer needs a server op 14 before the output can be judged "natural"; without one
@@ -87,6 +92,9 @@ pub struct CodecController {
     source: Option<String>,
     eligible: bool,
     held_since: Option<f64>,
+    forced: bool,
+    live_since: Option<f64>,
+    released_at: f64,
     last_watch: Option<Codecs>,
     watch_changed_at: f64,
     w: String,
@@ -110,6 +118,9 @@ impl CodecController {
             source: None,
             eligible: true,
             held_since: None,
+            forced: false,
+            live_since: None,
+            released_at: NEVER,
             last_watch: Some(&CODEC_ORDER[..]),
             watch_changed_at: NEVER,
             w: "AV1".to_string(),
@@ -170,6 +181,7 @@ impl CodecController {
                     output_id,
                     Out {
                         reported: codec,
+                        prev_offer: offer_top.clone(),
                         offer_top,
                         requested: Some(requested),
                         bound,
@@ -200,6 +212,7 @@ impl CodecController {
                     CodecAction::UpdateOutput { output_id, .. } => {
                         if let Some(o) = self.outs.get_mut(&output_id) {
                             o.requested = None;
+                            o.offer_top.clone_from(&o.prev_offer);
                         }
                     }
                     CodecAction::SwapOutput { output_id, .. } => {
@@ -216,11 +229,18 @@ impl CodecController {
                 self.outs.shift_remove(&output_id);
             }
             CodecEvent::Hold => {
+                self.live_since = None;
                 if self.held_since.is_none() {
                     self.held_since = Some(now);
                 }
             }
-            CodecEvent::Live => self.held_since = None,
+            CodecEvent::Live => {
+                if self.forced {
+                    self.live_since.get_or_insert(now);
+                } else {
+                    self.held_since = None;
+                }
+            }
             CodecEvent::Tick => {}
         }
         self.reconcile(now)
@@ -228,9 +248,19 @@ impl CodecController {
 
     fn reconcile(&mut self, now: f64) -> Result<Vec<CodecAction>, UnknownCodec> {
         let mut actions = Vec::new();
-        let held = self
-            .held_since
-            .is_some_and(|since| now - since >= self.hold_force_s);
+        if self.forced {
+            if self.live_since.is_some_and(|t| now - t >= LIVE_STABLE_S) {
+                self.forced = false;
+                self.held_since = None;
+                self.live_since = None;
+                self.released_at = now;
+            }
+        } else if self.held_since.is_some_and(|since| {
+            now - since >= self.hold_force_s && now - self.released_at >= LIVE_STABLE_S
+        }) {
+            self.forced = true;
+        }
+        let held = self.forced;
         let e: Option<String> = match &self.source {
             None => None,
             Some(_) if !self.eligible || held => Some("H264".to_string()),
@@ -280,6 +310,7 @@ impl CodecController {
                         codecs: wanted,
                     });
                     o.requested = Some(wanted);
+                    o.prev_offer.clone_from(&o.offer_top);
                 }
                 o.offer_top.clone_from(&e);
             } else if rank(&o.offer_top)? > rank(&e)? {
@@ -289,6 +320,7 @@ impl CodecController {
                         codecs: wanted,
                     });
                     o.requested = Some(wanted);
+                    o.prev_offer.clone_from(&o.offer_top);
                 }
                 o.offer_top.clone_from(&e);
                 o.awaiting_until = now + self.upgrade_wait_s;

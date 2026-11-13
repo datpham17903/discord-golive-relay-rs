@@ -622,6 +622,10 @@ struct Hot {
     generation: u64,
     epoch: u64,
     last_idr_req: f64,
+    /// Audio packets the worker rejected (dropped, not fatal).
+    audio_dropped: u64,
+    /// (generation, epoch) whose video overflow was already reported.
+    overflow_reported: Option<(u64, u64)>,
 }
 
 struct Timing {
@@ -930,6 +934,8 @@ impl Service {
                     generation: 0,
                     epoch: 0,
                     last_idr_req: f64::NEG_INFINITY,
+                    audio_dropped: 0,
+                    overflow_reported: None,
                 }),
                 core: Mutex::new(core),
                 events_tx,
@@ -993,7 +999,7 @@ impl Service {
         let signals = self
             .install_signals
             .then(|| tokio::spawn(wait_signals(Arc::downgrade(&self))));
-        let events = tokio::spawn(Arc::clone(&self).events_loop());
+        let mut events = tokio::spawn(Arc::clone(&self).events_loop());
         // The latch is read (in `new`) before any login; a latched account never logs in.
         if self.sup.lock().state() != RelayState::Fatal
             && let Err(e) = self.start_adapter().await
@@ -1017,6 +1023,7 @@ impl Service {
             _ = done.wait_for(|d| *d) => None,
             r = &mut ticker => Some(r),
             r = &mut pump => Some(r),
+            r = &mut events => Some(r),
         };
         if let Some(r) = failed {
             let error = match r {
@@ -3360,9 +3367,9 @@ impl Service {
 
     /// UDP dispatcher thread: forward to the worker for the current (generation, epoch) only.
     fn ingress(&self, msg: Ingress) {
-        let (g, e) = match &msg {
-            Ingress::Video(m) => (m.generation, m.epoch),
-            Ingress::Audio(m) => (m.generation, m.epoch),
+        let (g, e, video) = match &msg {
+            Ingress::Video(m) => (m.generation, m.epoch, true),
+            Ingress::Audio(m) => (m.generation, m.epoch, false),
             _ => return,
         };
         let worker = {
@@ -3373,17 +3380,34 @@ impl Service {
             }
         };
         if !worker.send(msg) {
-            let _ = self.events_tx.send(Msg::IngressOverflow(g, e));
+            let mut h = self.hot.lock();
+            if !video {
+                h.audio_dropped += 1;
+            } else if h.overflow_reported != Some((g, e)) {
+                h.overflow_reported = Some((g, e));
+                drop(h);
+                let _ = self.events_tx.send(Msg::IngressOverflow(g, e));
+            }
         }
     }
 
     fn ingress_overflow(&self, c: &mut Core, g: u64, e: u64) {
         let now = monotonic();
-        if (g, e) != self.gen_epoch() || now - c.last_overflow < OVERFLOW_MIN_INTERVAL_S {
+        if (g, e) != self.gen_epoch() {
+            return;
+        }
+        if now - c.last_overflow < OVERFLOW_MIN_INTERVAL_S {
+            // not acted on: let the next dropped video packet of this epoch report again
+            let mut h = self.hot.lock();
+            if h.overflow_reported == Some((g, e)) {
+                h.overflow_reported = None;
+            }
             return;
         }
         c.last_overflow = now;
         c.metrics.inc("ingress_overflow", 1);
+        let dropped = self.hot.lock().audio_dropped;
+        c.metrics.gauge_int("ingress_audio_dropped", dropped as i64);
         // new epoch drops the buffered backlog
         self.handle(
             c,
@@ -3416,6 +3440,10 @@ impl Service {
     }
 
     fn pump_worker(&self, c: &mut Core, worker: &Arc<dyn Worker>) {
+        // `pump` may hold a worker that was replaced while it waited for the core lock.
+        if !self.worker().is_some_and(|w| Arc::ptr_eq(&w, worker)) {
+            return;
+        }
         let publishers = self.publishers();
         for item in worker.poll_egress(MAX_EGRESS_POLL) {
             match item {
@@ -3435,8 +3463,7 @@ impl Service {
         for ev in worker.poll_events() {
             self.on_worker_event_locked(c, ev);
         }
-        let current = self.worker().is_some_and(|w| Arc::ptr_eq(&w, worker));
-        if !worker.alive() && current && !c.worker_dead_reported {
+        if !worker.alive() && !c.worker_dead_reported {
             c.worker_dead_reported = true;
             let (g, e) = self.gen_epoch();
             self.handle(
@@ -4277,19 +4304,20 @@ async fn wait_signals(svc: Weak<Service>) {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
-            let mut term = match signal(SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(_) => {
-                    let _ = tokio::signal::ctrl_c().await;
-                    if let Some(s) = svc.upgrade() {
-                        s.request_shutdown();
-                    }
-                    continue;
+            let (Ok(mut term), Ok(mut hup)) = (
+                signal(SignalKind::terminate()),
+                signal(SignalKind::hangup()),
+            ) else {
+                let _ = tokio::signal::ctrl_c().await;
+                if let Some(s) = svc.upgrade() {
+                    s.request_shutdown();
                 }
+                continue;
             };
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {}
                 _ = term.recv() => {}
+                _ = hup.recv() => {}
             }
         }
         #[cfg(windows)]

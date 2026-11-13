@@ -637,6 +637,11 @@ fn apply_message(ssrcs: &SsrcMap, opcode: u8, d: &Value) {
                 ssrcs.update_video_state(user, video_state(d, previous.as_ref()));
             }
         }
+        op::CLIENT_DISCONNECT => {
+            if let Some(user) = d.get("user_id").and_then(json_u64) {
+                ssrcs.remove_user(user);
+            }
+        }
         _ => {}
     }
 }

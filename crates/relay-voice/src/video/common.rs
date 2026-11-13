@@ -46,6 +46,8 @@ fn random_u32() -> u32 {
 pub(super) struct DepacketizerState {
     timestamp: Option<u32>,
     last_sequence: Option<u16>,
+    // Survives frame boundaries so a lost first packet of a frame is detected.
+    prev_sequence: Option<u16>,
     discarding: bool,
     pub(super) frame: Vec<u8>,
 }
@@ -54,12 +56,30 @@ impl DepacketizerState {
     pub(super) fn begin_packet(&mut self, sequence: u16, timestamp: u32) {
         if self.timestamp != Some(timestamp) {
             self.reset(timestamp);
+            if let Some(prev) = self.prev_sequence
+                && prev.wrapping_add(1) != sequence
+            {
+                self.discard_frame();
+            }
         } else if let Some(last_sequence) = self.last_sequence
             && last_sequence.wrapping_add(1) != sequence
         {
             self.discard_frame();
         }
         self.last_sequence = Some(sequence);
+        self.prev_sequence = Some(sequence);
+    }
+
+    /// Advances past a padding packet only when it continues the sequence, so a gap before it is
+    /// still detected.
+    pub(super) fn skip_packet(&mut self, sequence: u16) {
+        let follows = |last: Option<u16>| last.is_some_and(|s| s.wrapping_add(1) == sequence);
+        if follows(self.prev_sequence) {
+            self.prev_sequence = Some(sequence);
+        }
+        if follows(self.last_sequence) {
+            self.last_sequence = Some(sequence);
+        }
     }
 
     fn reset(&mut self, timestamp: u32) {
@@ -156,5 +176,51 @@ impl PacketizerState {
         let next = self.sequence.get().wrapping_add(1);
         self.sequence.set(next);
         next
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lost_first_packet_of_a_frame_discards_it() {
+        let mut state = DepacketizerState::default();
+        state.begin_packet(1, 100);
+        assert!(!state.is_discarding());
+        state.frame.push(1);
+        assert!(state.finish_frame().is_some());
+        // sequence 2 (first packet of the next frame) is lost
+        state.begin_packet(3, 200);
+        assert!(state.is_discarding());
+        state.begin_packet(4, 200);
+        assert!(state.is_discarding());
+        // a contiguous frame afterwards is accepted
+        state.finish_frame();
+        state.begin_packet(5, 300);
+        assert!(!state.is_discarding());
+    }
+
+    #[test]
+    fn padding_between_frames_is_not_a_loss() {
+        let mut state = DepacketizerState::default();
+        state.begin_packet(1, 100);
+        state.frame.push(1);
+        assert!(state.finish_frame().is_some());
+        state.skip_packet(2);
+        state.begin_packet(3, 200);
+        assert!(!state.is_discarding());
+    }
+
+    #[test]
+    fn padding_after_a_gap_keeps_the_gap() {
+        let mut state = DepacketizerState::default();
+        state.begin_packet(1, 100);
+        state.frame.push(1);
+        assert!(state.finish_frame().is_some());
+        // 2 lost, 3 is padding: the frame starting at 4 still follows a loss
+        state.skip_packet(3);
+        state.begin_packet(4, 200);
+        assert!(state.is_discarding());
     }
 }

@@ -196,10 +196,47 @@ fn test_hold_then_live_restores() {
     assert_eq!(acts, vec![update_output(A, "H264")]);
     assert_eq!(c.effective(), Some("H264"));
     assert_eq!(h(&mut c, out_codec(A, "H264"), 3.6), vec![swap(A, "H264")]);
-    let acts = h(&mut c, CodecEvent::Live, 5.0);
+    h(&mut c, CodecEvent::Live, 5.0);
+    assert_eq!(c.effective(), Some("H264")); // Live must persist before the release
+    let acts = h(&mut c, CodecEvent::Tick, 10.1);
     assert_eq!(c.effective(), Some("H265"));
     assert!(acts.contains(&update_output(A, "H265")));
-    assert_eq!(h(&mut c, out_codec(A, "H265"), 5.1), vec![swap(A, "H265")]);
+    assert_eq!(h(&mut c, out_codec(A, "H265"), 10.2), vec![swap(A, "H265")]);
+}
+
+#[test]
+fn test_forced_codec_does_not_flap_on_brief_live() {
+    let mut c = CodecController::new();
+    h(&mut c, source("H265", true), 0.0);
+    h(&mut c, added(A, "H265", "H265"), 0.0);
+    h(&mut c, CodecEvent::Hold, 1.0);
+    h(&mut c, CodecEvent::Tick, 3.5);
+    assert_eq!(c.effective(), Some("H264"));
+    h(&mut c, CodecEvent::Live, 4.0);
+    h(&mut c, CodecEvent::Hold, 4.5); // live broke before it was stable
+    h(&mut c, CodecEvent::Tick, 9.0);
+    assert_eq!(c.effective(), Some("H264"));
+    h(&mut c, CodecEvent::Live, 9.5);
+    h(&mut c, CodecEvent::Tick, 14.6);
+    assert_eq!(c.effective(), Some("H265"));
+    // cooldown before re-forcing
+    h(&mut c, CodecEvent::Hold, 15.0);
+    h(&mut c, CodecEvent::Tick, 17.5);
+    assert_eq!(c.effective(), Some("H265"));
+    h(&mut c, CodecEvent::Tick, 19.7);
+    assert_eq!(c.effective(), Some("H264"));
+}
+
+#[test]
+fn test_failed_offer_raise_is_retried() {
+    let mut c = CodecController::new();
+    h(&mut c, source("H264", true), 0.0);
+    h(&mut c, added(A, "H264", "H264"), 0.0);
+    let acts = h(&mut c, source("H265", true), 1.0);
+    let u = update_output(A, "H265");
+    assert!(acts.contains(&u));
+    h(&mut c, CodecEvent::ActionFailed(u.clone()), 1.1);
+    assert!(h(&mut c, CodecEvent::Tick, 1.2).contains(&u));
 }
 
 #[test]

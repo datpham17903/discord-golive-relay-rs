@@ -39,6 +39,8 @@ use crate::voice_ws::{CodecSpec, speaking};
 const RTCP_FIR: u8 = 4;
 const DAVE_PENDING_VIDEO_MAX_FRAMES: usize = 128;
 const DAVE_PENDING_VIDEO_MAX_AGE: Duration = Duration::from_secs(10);
+/// Consecutive "old" packets after which a sequence stream is taken to have jumped and resyncs.
+const SEQUENCE_RESYNC_OLD_RUN: u32 = 64;
 const DAVE_TAG_SIZE: usize = 8;
 const DAVE_SIZE_SIZE: usize = 1;
 const DAVE_MARKER: [u8; 2] = [0xFA, 0xFA];
@@ -306,6 +308,22 @@ impl SsrcMap {
         inner.video_states.insert(user_id, state);
     }
 
+    /// op 13 CLIENT_DISCONNECT: forget every SSRC of the user.
+    pub fn remove_user(&self, user_id: u64) {
+        let mut inner = self.inner.lock();
+        inner.ssrc_user.retain(|_, user| *user != user_id);
+        if let Some(previous) = inner.video_states.remove(&user_id) {
+            for ssrc in previous.ssrcs(false) {
+                inner.video_ssrcs.remove(&ssrc);
+            }
+            for (rtx, media) in previous.rtx_pairs() {
+                if inner.rtx_media.get(&rtx) == Some(&media) {
+                    inner.rtx_media.remove(&rtx);
+                }
+            }
+        }
+    }
+
     pub fn user_for(&self, ssrc: u32) -> Option<u64> {
         self.inner.lock().ssrc_user.get(&ssrc).copied()
     }
@@ -352,6 +370,7 @@ struct ReorderBuffer {
     pushed: u64,
     duplicates: u64,
     old: u64,
+    old_run: u32,
     waits: u64,
     flushes: u64,
     skipped: u64,
@@ -370,6 +389,7 @@ impl ReorderBuffer {
             pushed: 0,
             duplicates: 0,
             old: 0,
+            old_run: 0,
             waits: 0,
             flushes: 0,
             skipped: 0,
@@ -381,7 +401,7 @@ impl ReorderBuffer {
     fn push(&mut self, packet: Received, now: Instant) -> Vec<Received> {
         let sequence = packet.decoded.sequence;
         self.pushed += 1;
-        let (expected, unwrapped) = match self.expected {
+        let (mut expected, mut unwrapped) = match self.expected {
             None => {
                 self.expected = Some(i64::from(sequence));
                 (i64::from(sequence), i64::from(sequence))
@@ -390,8 +410,18 @@ impl ReorderBuffer {
         };
         if unwrapped < expected {
             self.old += 1;
-            return Vec::new();
+            self.old_run += 1;
+            if self.old_run < SEQUENCE_RESYNC_OLD_RUN {
+                return Vec::new();
+            }
+            // The sender's sequence jumped by half the space or more: restart from here.
+            self.packets.clear();
+            self.blocked_at = None;
+            expected = i64::from(sequence);
+            unwrapped = expected;
+            self.expected = Some(expected);
         }
+        self.old_run = 0;
         if self.packets.contains_key(&unwrapped) {
             self.duplicates += 1;
         }
@@ -492,6 +522,7 @@ struct RxState {
     depacketizers: HashMap<(u32, u8), Box<dyn VideoDepacketizer + Send>>,
     frame_rtp: HashMap<(u32, u8), Vec<RtpPacketInfo>>,
     last_sequence: HashMap<u32, u16>,
+    old_sequence_run: HashMap<u32, u32>,
     pending_nacks: HashMap<u32, HashMap<u16, PendingNack>>,
     reorder: HashMap<(u32, u8), ReorderBuffer>,
     startup_plis: HashSet<u32>,
@@ -866,6 +897,12 @@ impl Receiver {
             .depacketizers
             .entry(key)
             .or_insert_with(|| depacketizer_for(p.codec));
+        if p.decoded.payload.is_empty() {
+            // padding (e.g. bandwidth probing): no media, but its sequence number is not a loss
+            depacketizer.skip_packet(p.decoded.sequence);
+            self.stat(st, "video_padding_packets", 1);
+            return None;
+        }
         let pushed = depacketizer.push_packet(
             &p.decoded.payload,
             p.decoded.marker,
@@ -895,6 +932,12 @@ impl Receiver {
         };
         let rtp_packets = std::mem::take(st.frame_rtp.entry(key).or_default());
 
+        // An earlier frame of this SSRC is still waiting for its key: queue behind it so frames
+        // are never released out of order.
+        if st.pending_dave.iter().any(|f| f.ssrc == p.ssrc) {
+            self.stash_dave_frame(st, &p, frame, rtp_packets, false);
+            return None;
+        }
         let looks_like_dave = looks_like_dave_protocol_frame(&frame);
         if looks_like_dave && !self.can_attempt_dave(p.user_id) {
             self.note_undecryptable(p.user_id);
@@ -1031,12 +1074,25 @@ impl Receiver {
         let mut ready = Vec::new();
         let mut remaining = VecDeque::new();
         let mut expired = 0;
+        // SSRCs whose oldest frame is still unresolved (later frames wait behind it) or expired
+        // (later frames are dropped; the keyframe gate waits for the next keyframe).
+        let mut blocked: HashSet<u32> = HashSet::new();
+        let mut expired_ssrcs: HashSet<u32> = HashSet::new();
         while let Some(mut frame) = st.pending_dave.pop_front() {
-            if now.saturating_duration_since(frame.queued_at) > DAVE_PENDING_VIDEO_MAX_AGE {
+            if expired_ssrcs.contains(&frame.ssrc)
+                || now.saturating_duration_since(frame.queued_at) > DAVE_PENDING_VIDEO_MAX_AGE
+            {
+                expired_ssrcs.insert(frame.ssrc);
+                blocked.remove(&frame.ssrc);
                 expired += 1;
                 continue;
             }
+            if blocked.contains(&frame.ssrc) {
+                remaining.push_back(frame);
+                continue;
+            }
             if !self.can_attempt_dave(frame.user_id) {
+                blocked.insert(frame.ssrc);
                 remaining.push_back(frame);
                 continue;
             }
@@ -1056,6 +1112,7 @@ impl Receiver {
                 }
                 Err(e) if e.is_retryable() => {
                     frame.counted = true;
+                    blocked.insert(frame.ssrc);
                     remaining.push_back(frame);
                 }
                 Err(_) => {}
@@ -1148,6 +1205,19 @@ impl Receiver {
             return;
         };
         let delta = rtcp::sequence_delta(sequence, previous);
+        if delta > 0x7FFF {
+            let run = st.old_sequence_run.entry(ssrc).or_default();
+            *run += 1;
+            if *run >= SEQUENCE_RESYNC_OLD_RUN {
+                // The sender's sequence jumped: restart tracking from here.
+                st.old_sequence_run.remove(&ssrc);
+                st.last_sequence.insert(ssrc, sequence);
+                st.pending_nacks.remove(&ssrc);
+                return;
+            }
+        } else {
+            st.old_sequence_run.remove(&ssrc);
+        }
         if delta == 0 || delta > 0x7FFF {
             self.stat(
                 st,
@@ -1415,9 +1485,13 @@ impl Receiver {
         Self::retire_reorder_stats(&mut st);
         st.depacketizers.clear();
         st.last_sequence.clear();
+        st.old_sequence_run.clear();
         st.pending_nacks.clear();
         st.reorder.clear();
         st.startup_plis.clear();
+        st.report_states.clear();
+        st.sender_reports.clear();
+        st.sender_report_lsr.clear();
         st.frame_rtp.clear();
         st.pending_dave.clear();
     }
@@ -1721,6 +1795,26 @@ mod tests {
         assert!(buffer.push(received(0), t0).is_empty());
         assert_eq!(seqs(&buffer.push(received(65_535), t0)), [65_535, 0]);
         assert_eq!(seqs(&buffer.push(received(1), t0)), [1]);
+    }
+
+    #[test]
+    fn reorder_resyncs_after_a_sequence_jump() {
+        let t0 = Instant::now();
+        let mut buffer = ReorderBuffer::new(8, Duration::from_millis(500));
+        assert_eq!(seqs(&buffer.push(received(10), t0)), [10]);
+        // half the sequence space away: every packet looks old until the run is long enough
+        for i in 0..SEQUENCE_RESYNC_OLD_RUN - 1 {
+            assert!(buffer.push(received(40_000 + i as u16), t0).is_empty());
+        }
+        let resync = SEQUENCE_RESYNC_OLD_RUN as u16 - 1;
+        assert_eq!(
+            seqs(&buffer.push(received(40_000 + resync), t0)),
+            [40_000 + resync]
+        );
+        assert_eq!(
+            seqs(&buffer.push(received(40_000 + resync + 1), t0)),
+            [40_000 + resync + 1]
+        );
     }
 
     #[test]

@@ -99,6 +99,9 @@ enum Phase {
     Closed(String),
 }
 
+/// Upper bound for login plus READY in `start`.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[derive(Default)]
 struct State {
     vc: Option<VoiceClient>,
@@ -209,11 +212,18 @@ impl Inner {
         self.st.lock().pump = Some(pump);
 
         let mut phase = self.phase.subscribe();
-        let phase = phase
-            .wait_for(|p| *p != Phase::Connecting)
-            .await
-            .map(|p| p.clone())
-            .unwrap_or(Phase::Closed("gateway ended before READY".into()));
+        let waited = tokio::time::timeout(START_TIMEOUT, async {
+            phase
+                .wait_for(|p| *p != Phase::Connecting)
+                .await
+                .map(|p| p.clone())
+                .unwrap_or(Phase::Closed("gateway ended before READY".into()))
+        })
+        .await;
+        let Ok(phase) = waited else {
+            self.close().await;
+            return Err(AdapterError::failed("timed out waiting for READY"));
+        };
         if let Phase::Closed(error) = phase {
             return Err(AdapterError::failed(error));
         }
@@ -222,6 +232,16 @@ impl Inner {
             return Err(AdapterError::AccountMismatch);
         }
         Ok(())
+    }
+
+    /// The gateway gave up after READY (fatal close code): tell the pool, which would otherwise keep
+    /// a mirror whose account can no longer see voice.
+    fn on_gateway_closed(&self, _error: &crate::Error) {
+        // The gateway task only ends on a non-resumable close (1000, 4004, 4010-4014): the account is
+        // unusable until a restart, published or idle, so the pool must stop using it.
+        self.emit(PoolEvent::OutAuthRejected {
+            account: self.opts.user_id,
+        });
     }
 
     fn parent_codec_specs(&self) -> Vec<relay_voice::voice_ws::CodecSpec> {
@@ -234,6 +254,23 @@ impl Inner {
 
     // ------------------------------------------------------------- dispatches
 
+    fn participants_if_changed(&self, change: &CacheChange) {
+        match change {
+            CacheChange::Voice { before, after, .. } => {
+                let channel = Some(self.channel_id());
+                if before.and_then(|v| v.channel_id) == channel || after.channel_id == channel {
+                    self.emit_participants();
+                }
+            }
+            CacheChange::Batch(changes) => {
+                for change in changes {
+                    self.participants_if_changed(change);
+                }
+            }
+            CacheChange::Stream { .. } => {}
+        }
+    }
+
     fn handle_dispatch(&self, d: &Dispatch) {
         let uid = self.opts.user_id;
         match d.name.as_str() {
@@ -244,11 +281,13 @@ impl Inner {
                 if d.data.get("user_id").and_then(snowflake) == Some(uid) {
                     self.observe_own_voice_state(&d.data);
                 }
-                if let Some(CacheChange::Voice { before, after, .. }) = &d.change {
-                    let channel = Some(self.channel_id());
-                    if before.and_then(|v| v.channel_id) == channel || after.channel_id == channel {
-                        self.emit_participants();
-                    }
+                if let Some(change) = &d.change {
+                    self.participants_if_changed(change);
+                }
+            }
+            "PASSIVE_UPDATE_V2" => {
+                if let Some(change) = &d.change {
+                    self.participants_if_changed(change);
                 }
             }
             "STREAM_CREATE" | "STREAM_UPDATE" => {
@@ -624,7 +663,11 @@ async fn run_gateway(adapter: Weak<Inner>, mut events: UnboundedReceiver<Gateway
             GatewayEvent::Dispatch(dispatch) => inner.handle_dispatch(&dispatch),
             GatewayEvent::Disconnected { .. } => {}
             GatewayEvent::Closed(error) => {
-                inner.phase.send_replace(Phase::Closed(error.to_string()));
+                let before = inner.phase.send_replace(Phase::Closed(error.to_string()));
+                // Before READY `start` reports the failure; afterwards nobody else would notice.
+                if before == Phase::Ready {
+                    inner.on_gateway_closed(&error);
+                }
                 return;
             }
         }

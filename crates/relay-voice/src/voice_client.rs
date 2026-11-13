@@ -136,6 +136,9 @@ pub(crate) struct StreamInfo {
     pub unavailable: bool,
 }
 
+/// Most STREAM_DELETE reasons remembered for streams that are not clients.
+const MAX_STREAM_DELETED: usize = 64;
+
 pub(crate) struct VcState {
     phase: Phase,
     channel_id: u64,
@@ -655,6 +658,10 @@ impl VcInner {
                     } else {
                         st.streams.remove(&stream_key);
                         st.stream_servers.remove(&stream_key);
+                        if st.stream_deleted.len() >= MAX_STREAM_DELETED {
+                            // Only recent deletes matter (a stream about to be joined).
+                            st.stream_deleted.clear();
+                        }
                         st.stream_deleted.insert(stream_key.clone(), reason.clone());
                     }
                     st.stream_clients.get(&stream_key).cloned()

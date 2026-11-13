@@ -507,6 +507,15 @@ impl Sender {
             if now >= next_video {
                 next_video = match self.send_video_tick() {
                     VideoTick::Sent(frame_time) => next_video_time(next_video, frame_time),
+                    VideoTick::Dropped(frame_time) => {
+                        // The viewers lost a frame they cannot recover from: ask for a keyframe
+                        // (here, with the `active` lock released).
+                        let handler = self.pli.lock().clone();
+                        if let Some(handler) = handler {
+                            handler();
+                        }
+                        next_video_time(next_video, frame_time)
+                    }
                     VideoTick::Idle => Instant::now() + VIDEO_RETRY,
                     VideoTick::NotReady => Instant::now() + VIDEO_NOT_READY_RETRY,
                 };
@@ -646,7 +655,7 @@ impl Sender {
             Ok(encrypted) => encrypted,
             Err(_) => {
                 add(&self.counters.dave_encrypt_errors, 1);
-                return VideoTick::Sent(frame_time);
+                return VideoTick::Dropped(frame_time);
             }
         };
         let udp = conn.udp();
@@ -717,6 +726,8 @@ impl Sender {
 enum VideoTick {
     /// A frame went out (or was dropped); the next is due after this long.
     Sent(Duration),
+    /// The frame could not be encrypted and was not sent; the next is due after this long.
+    Dropped(Duration),
     /// The source had nothing due.
     Idle,
     /// Video is not started (no codec or SSRC yet).

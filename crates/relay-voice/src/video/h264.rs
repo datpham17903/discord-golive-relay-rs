@@ -77,6 +77,10 @@ impl Default for H264Depacketizer {
 }
 
 impl VideoDepacketizer for H264Depacketizer {
+    fn skip_packet(&mut self, sequence: u16) {
+        self.state.skip_packet(sequence);
+    }
+
     fn push_packet(
         &mut self,
         payload: &[u8],

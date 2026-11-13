@@ -41,6 +41,10 @@ pub trait VideoDepacketizer {
         sequence: u16,
         timestamp: u32,
     ) -> Result<Option<Vec<u8>>, PacketError>;
+
+    /// A payload-less (padding) packet: it carries no media but uses up `sequence`, so it must not
+    /// read as a lost packet before the next frame.
+    fn skip_packet(&mut self, sequence: u16);
 }
 
 /// Depacketizer for the codec of an incoming video stream.

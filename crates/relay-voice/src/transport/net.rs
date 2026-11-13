@@ -14,7 +14,7 @@ use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -29,6 +29,8 @@ const UDP_IDLE_SLEEP: Duration = Duration::from_millis(1);
 const UDP_PACKET_BUFFER_SIZE: usize = 2048;
 const UDP_RECV_BATCH_SIZE: usize = 128;
 const UDP_DEFAULT_BUFFER_SIZE: usize = 4 * 1024 * 1024;
+const UDP_DISPATCH_QUEUE_CAPACITY: usize = 256;
+const DISPATCHER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 const UDP_LISTENER_RTP: u8 = 1;
 const UDP_LISTENER_RTCP: u8 = 1 << 1;
 
@@ -128,6 +130,7 @@ pub struct UdpStats {
     pub dispatch_packets_dispatched: usize,
     pub dispatch_queue_pending: usize,
     pub dispatch_queue_max_pending: usize,
+    pub dispatch_batches_dropped: usize,
 }
 
 #[derive(Default)]
@@ -147,6 +150,7 @@ struct UdpTransportStats {
     dispatch_packets_dispatched: AtomicUsize,
     dispatch_queue_pending: AtomicUsize,
     dispatch_queue_max_pending: AtomicUsize,
+    dispatch_batches_dropped: AtomicUsize,
 }
 
 struct UdpListener {
@@ -163,7 +167,7 @@ struct UdpTransportInner {
     listeners: Mutex<Vec<UdpListener>>,
     reader: Mutex<Option<JoinHandle<()>>>,
     dispatcher: Mutex<Option<JoinHandle<()>>>,
-    dispatch_tx: Mutex<Option<Sender<UdpDispatchBatch>>>,
+    dispatch_tx: Mutex<Option<SyncSender<UdpDispatchBatch>>>,
     ping: Mutex<Option<UDPPing>>,
     stats: UdpTransportStats,
 }
@@ -219,7 +223,7 @@ impl UdpTransportInner {
             return;
         }
 
-        let (dispatch_tx, dispatch_rx) = mpsc::channel();
+        let (dispatch_tx, dispatch_rx) = mpsc::sync_channel(UDP_DISPATCH_QUEUE_CAPACITY);
         *self
             .dispatch_tx
             .lock()
@@ -299,7 +303,15 @@ impl UdpTransportInner {
         if let Some(handle) = handle
             && handle.thread().id() != thread::current().id()
         {
-            let _ = handle.join();
+            let deadline = Instant::now() + DISPATCHER_JOIN_TIMEOUT;
+            while !handle.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                eprintln!("UDP dispatcher did not stop within the join timeout; detaching it");
+            }
         }
     }
 
@@ -492,7 +504,7 @@ fn queue_udp_dispatch(inner: &Arc<UdpTransportInner>, batch: UdpDispatchBatch) {
         + 1;
     update_atomic_max(&inner.stats.dispatch_queue_max_pending, pending);
 
-    match sender.send(batch) {
+    match sender.try_send(batch) {
         Ok(()) => {
             inner
                 .stats
@@ -503,11 +515,17 @@ fn queue_udp_dispatch(inner: &Arc<UdpTransportInner>, batch: UdpDispatchBatch) {
                 .dispatch_packets_queued
                 .fetch_add(packet_count, Ordering::Relaxed);
         }
-        Err(_) => {
+        Err(err) => {
             inner
                 .stats
                 .dispatch_queue_pending
                 .fetch_sub(1, Ordering::Relaxed);
+            if matches!(err, TrySendError::Full(_)) {
+                inner
+                    .stats
+                    .dispatch_batches_dropped
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -731,6 +749,7 @@ impl UdpTransport {
             dispatch_packets_dispatched: load(&stats.dispatch_packets_dispatched),
             dispatch_queue_pending: load(&stats.dispatch_queue_pending),
             dispatch_queue_max_pending: load(&stats.dispatch_queue_max_pending),
+            dispatch_batches_dropped: load(&stats.dispatch_batches_dropped),
         }
     }
 

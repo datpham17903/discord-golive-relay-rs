@@ -177,6 +177,8 @@ pub struct Supervisor {
     rng: SplitMix64,
     retry: RetryPolicy,
     watch_retry_since: Option<f64>,
+    /// Incarnation `watch_retry_since` belongs to; a new one restarts the fast-retry window.
+    watch_retry_inc: Option<i64>,
     fast_fails: u32,
     prejoin_retry: RetryPolicy,
     prejoin_after: Option<f64>,
@@ -240,6 +242,7 @@ impl Supervisor {
             rng: SplitMix64::from_clock(),
             retry,
             watch_retry_since: None,
+            watch_retry_inc: None,
             fast_fails: 0,
             prejoin_retry,
             prejoin_after: None,
@@ -464,6 +467,10 @@ impl Supervisor {
             .expect("a start requires a stream (source_ok checked stream_available)");
         self.epoch += 1;
         self.reset_session();
+        if Some(stream.incarnation) != self.watch_retry_inc {
+            self.watch_retry_since = None;
+            self.watch_retry_inc = Some(stream.incarnation);
+        }
         self.cur_inc = Some(stream.incarnation);
         self.session_stream = Some(stream.clone());
         self.connect_started = now;
@@ -1073,7 +1080,6 @@ impl Supervisor {
             return;
         }
         self.debounce_since = None;
-        self.watch_retry_since = None;
         self.fast_fails = 0;
         let prejoin = self.cfg.prejoin_voice && self.prejoin_ok(now);
         if !prejoin {

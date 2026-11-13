@@ -39,6 +39,8 @@ use crate::transport::TransportEncryptionMode;
 
 /// Voice gateway version of the pinned `discord.py-self` (`wss://{endpoint}/?v=9`).
 pub const VOICE_GATEWAY_VERSION: u8 = 9;
+/// A send stuck longer than this stalls heartbeats and receives: the connection is dead.
+const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_MESSAGE_SIZE: usize = 15 * 1024 * 1024;
 /// Resume attempts in a row without a RESUMED (`_inner_connect` tries 5 times).
 pub const RESUME_ATTEMPTS: u32 = 5;
@@ -957,10 +959,10 @@ impl Task {
         let Some(ws) = self.ws.as_mut() else {
             return Some(Exit::dropped("no socket"));
         };
-        ws.send(msg)
-            .await
-            .err()
-            .map(|e| Exit::dropped(e.to_string()))
+        match tokio::time::timeout(SEND_TIMEOUT, ws.send(msg)).await {
+            Ok(result) => result.err().map(|e| Exit::dropped(e.to_string())),
+            Err(_) => Some(Exit::dropped("websocket send timed out")),
+        }
     }
 
     async fn on_command(&mut self, cmd: Option<Outgoing>) -> Option<Exit> {

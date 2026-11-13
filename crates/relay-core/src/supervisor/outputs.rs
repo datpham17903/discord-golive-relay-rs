@@ -49,6 +49,8 @@ struct Acct {
     counted_inc: Option<i64>,
     streamed_inc: Option<i64>,
     queued: bool,
+    /// Backing off after a stream_full (slot race) refusal: keeps its relay slot meanwhile.
+    slot_full: bool,
     /// An excluded viewer is in this mirror channel.
     blocked: bool,
     /// Go Live created (READY) in the current run.
@@ -94,6 +96,7 @@ impl Acct {
             reason,
         });
         self.detector.disarm();
+        self.slot_full = false;
         self.generation = None;
         self.state = OutputState::Off;
         self.live_at = None;
@@ -242,6 +245,7 @@ impl OutputPool {
                     counted_inc: None,
                     streamed_inc: None,
                     queued: false,
+                    slot_full: false,
                     blocked: false,
                     live_at: None,
                     viewers: None,
@@ -454,13 +458,14 @@ impl OutputPool {
                 attempt,
                 reason,
                 retryable,
-                ..
+                detail,
             } => {
                 if let Some(uid) = self.current(account, generation, attempt) {
                     let rec = self.rec_mut(uid);
                     if rec.active() {
                         if retryable {
                             rec.backoff(reason, now, &mut out);
+                            rec.slot_full = detail.contains("stream_full");
                         } else {
                             rec.skip_generation = rec.generation;
                             rec.stop("failed", reason, &mut out);
@@ -536,11 +541,11 @@ impl OutputPool {
         })
     }
 
-    /// A relay in BACKOFF or failed for this session cannot hold a slot, so the next relay takes over.
+    /// A relay in BACKOFF (other than after a stream_full slot race) or failed for this session cannot hold a slot, so the next relay takes over.
     fn relay_candidate(&self, uid: u64) -> bool {
         let rec = self.rec(uid);
         rec.usable()
-            && rec.state != OutputState::Backoff
+            && (rec.state != OutputState::Backoff || rec.slot_full)
             && !self
                 .session
                 .is_some_and(|s| rec.skip_generation == Some(s.generation))
@@ -600,13 +605,14 @@ impl OutputPool {
             .filter(|u| !due.contains(u))
             .collect();
         let room = self.relay_target.saturating_sub(keep.len());
-        let idle = self
+        let mut idle: Vec<u64> = self
             .relays
             .iter()
             .copied()
             .filter(|&u| self.relay_candidate(u) && !running.contains(&u))
-            .take(room);
-        keep.extend(idle);
+            .collect();
+        idle.sort_by_key(|&u| !self.rec(u).slot_full);
+        keep.extend(idle.into_iter().take(room));
         keep
     }
 
@@ -770,7 +776,7 @@ impl OutputPool {
         let mismatch = if self.adaptive {
             !CODEC_ORDER.contains(&negotiated.unwrap_or("").to_uppercase().as_str())
         } else {
-            negotiated != Some("H264")
+            !negotiated.is_some_and(|n| n.eq_ignore_ascii_case("H264"))
         };
         let rec = self.rec_mut(uid);
         if rec.state != OutputState::Joining {

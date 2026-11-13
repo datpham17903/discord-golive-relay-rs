@@ -66,6 +66,10 @@ impl Default for VP8Depacketizer {
 }
 
 impl VideoDepacketizer for VP8Depacketizer {
+    fn skip_packet(&mut self, sequence: u16) {
+        self.state.skip_packet(sequence);
+    }
+
     fn push_packet(
         &mut self,
         payload: &[u8],

@@ -733,6 +733,52 @@ fn ready_with_a_channel_that_is_not_a_voice_channel_is_config_invalid() {
 }
 
 #[test]
+fn ready_with_the_guild_unavailable_waits_for_guild_create() {
+    let rig = Rig::new();
+    rig.seed("GUILD_DELETE", json!({"id": "1", "unavailable": true}));
+    rig.dispatch("READY_SUPPLEMENTAL", json!({"guilds": []}));
+    assert!(rig.model().is_empty());
+    rig.dispatch(
+        "GUILD_CREATE",
+        json!({"id": "1", "channels": [{"id": "2", "type": 2}]}),
+    );
+    assert!(matches!(
+        rig.model().as_slice(),
+        [Event::GatewaySnapshot {
+            new_session: true,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn voice_state_of_the_target_in_another_guild_is_ignored() {
+    let rig = Rig::new();
+    rig.seed("GUILD_CREATE", json!({"id": "9", "channels": []}));
+    rig.dispatch(
+        "VOICE_STATE_UPDATE",
+        json!({"guild_id": "9", "user_id": TARGET.to_string(),
+               "channel_id": "99", "self_stream": true}),
+    );
+    assert!(rig.model().is_empty());
+}
+
+#[test]
+fn passive_update_v2_voice_states_reach_the_target_state() {
+    let rig = Rig::new();
+    rig.dispatch(
+        "PASSIVE_UPDATE_V2",
+        json!({"guild_id": "1", "updated_voice_states": [
+            {"user_id": TARGET.to_string(), "channel_id": CHAN.to_string(), "self_stream": true}]}),
+    );
+    assert!(
+        rig.model()
+            .iter()
+            .any(|e| matches!(e, Event::TargetVoiceChanged { target: Some(_) }))
+    );
+}
+
+#[test]
 fn ready_emits_a_new_session_snapshot() {
     let rig = Rig::new();
     rig.dispatch("READY_SUPPLEMENTAL", json!({"guilds": []}));

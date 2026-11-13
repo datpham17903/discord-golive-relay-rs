@@ -35,6 +35,8 @@ pub const CAPABILITIES: u64 = 22525;
 const QOS_HEARTBEAT_VERSION: u32 = 27;
 const TIME_SPENT_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const MAX_MESSAGE_SIZE: usize = 15 * 1024 * 1024;
+/// A connection that stayed up this long reconnects at once and resets the backoff.
+const HEALTHY_AFTER: Duration = Duration::from_secs(30);
 const COMPRESSION_TYPE: &str = "zstd-stream";
 
 mod op {
@@ -439,6 +441,10 @@ impl Backoff {
         }
     }
 
+    fn reset(&mut self) {
+        self.exp = 0;
+    }
+
     fn delay(&mut self) -> Duration {
         let now = Instant::now();
         if now.duration_since(self.last).as_secs_f64() > Self::BASE_SECS * 2f64.powi(11) {
@@ -516,8 +522,19 @@ impl Task {
         let mut backoff = Backoff::new();
         let mut resume = false;
         loop {
+            // A connection that lasted reconnects at once (e.g. a routine op 7); one that dropped
+            // soon after connecting waits a growing delay, so an IDENTIFY/close loop slows down.
+            let mut lasted = false;
             let exit = match self.connect(resume).await {
-                Ok(mut conn) => self.serve(&mut conn).await,
+                Ok(mut conn) => {
+                    let up_since = Instant::now();
+                    let exit = self.serve(&mut conn).await;
+                    if up_since.elapsed() >= HEALTHY_AFTER {
+                        backoff.reset();
+                        lasted = true;
+                    }
+                    exit
+                }
                 Err(e) => {
                     // OSError/HTTPException/CurlError: back off, then always try to RESUME.
                     self.emit(GatewayEvent::Disconnected {
@@ -549,6 +566,13 @@ impl Task {
                         reason,
                         resume,
                     });
+                    if !lasted {
+                        let delay = backoff.delay();
+                        tokio::select! {
+                            () = tokio::time::sleep(delay) => {}
+                            () = self.ev_tx.closed() => return,
+                        }
+                    }
                     if self.drain_commands() {
                         return;
                     }

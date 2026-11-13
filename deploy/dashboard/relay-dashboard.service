@@ -7,7 +7,11 @@ After=network-online.target
 ExecStart=/opt/relay-dashboard/relayctl dashboard --status /var/lib/discord-relay/status.json --log /opt/discord-relay-rs/relay.log --data /var/lib/relay-dashboard --listen 127.0.0.1:8787
 Restart=always
 RestartSec=5
-DynamicUser=yes
+# root (status.json is 0600 root) but with no capabilities and a read-only system
+CapabilityBoundingSet=
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 StateDirectory=relay-dashboard
 ReadOnlyPaths=/var/lib/discord-relay /opt/discord-relay-rs
 ProtectSystem=strict

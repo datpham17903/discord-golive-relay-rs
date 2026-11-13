@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relay Status</title>
+<meta name="description" content="Trạng thái relay Go Live và hướng dẫn lệnh">
+<style>
+:root {
+  --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #5f6b7a; --line: #e3e7ec;
+  --ok: #1f9d55; --warn: #d97706; --bad: #dc2626; --info: #2563eb; --idle: #8a94a3;
+  --chart: #2563eb; --band: rgba(217,119,6,.14); --code: #eef1f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216; --card: #171b21; --text: #e6e9ee; --muted: #94a0b0; --line: #262c35;
+    --ok: #34c77b; --warn: #f0a434; --bad: #f05252; --info: #5b8ff9; --idle: #6b7685;
+    --chart: #5b8ff9; --band: rgba(240,164,52,.16); --code: #1f252d;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+h1 { font-size: 20px; margin: 0; }
+h2 { font-size: 15px; margin: 0 0 12px; color: var(--muted); font-weight: 600; }
+.muted { color: var(--muted); font-size: 13px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-top: 16px; }
+.hero { display: flex; gap: 14px; align-items: center; }
+.dot { width: 14px; height: 14px; border-radius: 50%; flex: none; background: var(--idle); }
+.dot.ok { background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 22%, transparent); }
+.dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); } .dot.info { background: var(--info); }
+.hero .title { font-size: 22px; font-weight: 700; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+.metric .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.metric .k { color: var(--muted); font-size: 13px; }
+.avail { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+.bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin-top: 6px; }
+.bar > div { height: 100%; background: var(--ok); }
+svg { width: 100%; height: 160px; display: block; }
+.legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; }
+.legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.legend .l1::before { background: var(--chart); } .legend .l2::before { background: var(--band); border: 1px solid var(--warn); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+td, th { text-align: left; padding: 8px 6px; border-top: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; border-top: 0; }
+.tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); }
+.tag.ok { color: var(--ok); border-color: var(--ok); } .tag.warn { color: var(--warn); border-color: var(--warn); }
+.tag.bad { color: var(--bad); border-color: var(--bad); } .tag.idle { color: var(--muted); }
+.cmd { display: grid; grid-template-columns: minmax(0, 260px) 1fr; gap: 6px 16px; align-items: start; }
+.cmd code { background: var(--code); padding: 3px 8px; border-radius: 6px; font: 13px/1.6 ui-monospace, Consolas, monospace; display: inline-block; cursor: pointer; word-break: break-all; }
+.cmd code:hover { outline: 1px solid var(--line); }
+.cmd div { padding: 4px 0; }
+.note { margin-top: 12px; padding: 10px 12px; border-left: 3px solid var(--info); background: var(--code); border-radius: 6px; font-size: 14px; }
+@media (max-width: 560px) { .cmd { grid-template-columns: 1fr; } .cmd div:nth-child(2n) { padding-top: 0; margin-bottom: 8px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Trạng thái Relay Go Live</h1>
+    <span class="muted" id="updated">Đang tải…</span>
+  </header>
+
+  <section class="card">
+    <div class="hero">
+      <div class="dot" id="dot"></div>
+      <div>
+        <div class="title" id="state">—</div>
+        <div class="muted" id="state-sub"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="grid">
+      <div class="metric"><div class="v" id="m-uptime">—</div><div class="k">Chiếu liên tục</div></div>
+      <div class="metric"><div class="v" id="m-fps">—</div><div class="k">Khung hình/giây</div></div>
+      <div class="metric"><div class="v" id="m-pps">—</div><div class="k">Gói video/giây</div></div>
+      <div class="metric"><div class="v" id="m-loss">—</div><div class="k">Gói mất (đã bù lại)</div></div>
+      <div class="metric"><div class="v" id="m-viewers">—</div><div class="k">Người xem relay</div></div>
+      <div class="metric"><div class="v" id="m-outputs">—</div><div class="k">Luồng phát / mirror</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Độ ổn định (chỉ tính lúc target đang live)</h2>
+    <div class="avail">
+      <div><div><b id="a24">—</b> <span class="muted">24 giờ qua</span></div><div class="bar"><div id="b24" style="width:0"></div></div><div class="muted" id="d24"></div></div>
+      <div><div><b id="a7">—</b> <span class="muted">7 ngày qua</span></div><div class="bar"><div id="b7" style="width:0"></div></div><div class="muted" id="d7"></div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Lưu lượng hình 1 giờ qua</h2>
+    <svg id="chart" viewBox="0 0 720 160" preserveAspectRatio="none" role="img" aria-label="Gói video mỗi giây trong 1 giờ qua"></svg>
+    <div class="legend muted"><span class="l1">Gói video/giây</span><span class="l2">Không chiếu (hold, kết nối lại, relay tắt)</span></div>
+  </section>
+
+  <section class="card">
+    <h2>Sự cố gần đây</h2>
+    <table>
+      <thead><tr><th>Bắt đầu</th><th>Kéo dài</th><th>Sự cố</th><th>Kết quả</th></tr></thead>
+      <tbody id="incidents"><tr><td colspan="4" class="muted">Chưa có dữ liệu</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Lệnh cho mọi người</h2>
+    <p class="muted" style="margin-top:0">Gõ trong kênh chat của server. Bấm vào lệnh để sao chép.</p>
+    <div class="cmd">
+      <div><code>!relay status</code></div><div>Xem relay đang chiếu hay không, ở kênh nào, có những mirror nào.</div>
+      <div><code>!relay mirror</code></div><div>Phát thêm relay vào kênh voice <b>bạn đang ngồi</b>.</div>
+      <div><code>!relay mirror &lt;channel_id&gt;</code></div><div>Phát thêm relay vào kênh voice có ID đó.</div>
+      <div><code>!relay unmirror</code></div><div>Gỡ mirror ở kênh voice bạn đang ngồi.</div>
+      <div><code>!relay unmirror &lt;channel_id&gt;</code></div><div>Gỡ mirror ở kênh có ID đó.</div>
+      <div><code>!relay unmirror all</code></div><div>Gỡ mọi mirror (chỉ khi tất cả đều do bạn tạo).</div>
+    </div>
+    <div class="note">Chỉ <b>người đã tạo mirror</b> hoặc <b>operator</b> mới gỡ được mirror đó. Các lệnh còn lại (bật/tắt, đổi target, đổi kênh…) chỉ operator dùng được. Mỗi người cần chờ vài giây giữa hai lệnh.</div>
+    <p class="muted">Lấy ID kênh: bật Developer Mode trong Cài đặt → Nâng cao, rồi chuột phải vào kênh → Sao chép ID.</p>
+  </section>
+</main>
+<script>
+const STATES = {
+  relaying: ["Đang chiếu", "ok"],
+  hold: ["Tạm giữ hình, đang tự hồi phục", "warn"],
+  connecting: ["Đang kết nối vào stream", "info"],
+  backoff: ["Đang thử kết nối lại", "warn"],
+  quarantine: ["Tạm khóa, chờ stream mới", "warn"],
+  fatal: ["Lỗi, cần operator xử lý", "bad"],
+  idle: ["Chờ target lên sóng", "idle"],
+  disabled: ["Relay đang tắt", "idle"],
+};
+const REASONS = {
+  input_keyframe: "chờ khung hình đầy đủ từ target",
+  no_media: "không nhận được hình từ target",
+  gateway_resume: "kết nối lại với Discord",
+  paused: "target tạm dừng stream",
+  pipeline_rebuild: "dựng lại luồng phát",
+};
+const KINDS = { hold: "Tạm giữ hình", backoff: "Kết nối thất bại, thử lại", connecting: "Kết nối lại",
+  quarantine: "Tạm khóa", fatal: "Lỗi nghiêm trọng", restart: "Relay khởi động lại" };
+
+const $ = id => document.getElementById(id);
+const fmtDur = s => {
+  if (s == null || !isFinite(s)) return "—";
+  s = Math.max(0, Math.round(s));
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  if (d) return `${d} ngày ${h} giờ`;
+  if (h) return `${h} giờ ${m} phút`;
+  if (m) return `${m} phút ${x} giây`;
+  return `${x} giây`;
+};
+const fmtTime = ts => new Date(ts * 1000).toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
+const num = (v, d = 0) => v == null ? "—" : v.toLocaleString("vi-VN", { maximumFractionDigits: d, minimumFractionDigits: d });
+
+function render(s) {
+  $("updated").textContent = "Cập nhật " + new Date(s.now * 1000).toLocaleTimeString("vi-VN");
+  let label, cls, sub = "";
+  if (!s.online) {
+    [label, cls] = ["Relay không phản hồi", "bad"];
+    sub = s.status_age_s != null ? `Không có tin từ relay ${fmtDur(s.status_age_s)}` : "Không đọc được trạng thái";
+  } else {
+    [label, cls] = STATES[s.state] || [s.state, "idle"];
+    const parts = [];
+    if (s.state_since) parts.push("từ " + fmtTime(s.state_since) + ` (${fmtDur(s.now - s.state_since)})`);
+    if (s.state === "hold" && REASONS[s.hold_reason]) parts.push("lý do: " + REASONS[s.hold_reason]);
+    if (s.codec && s.state === "relaying") parts.push("codec " + s.codec);
+    sub = parts.join(" · ");
+  }
+  $("dot").className = "dot " + cls;
+  $("state").textContent = label;
+  $("state-sub").textContent = sub;
+
+  const live = s.online && s.state === "relaying";
+  $("m-uptime").textContent = live ? fmtDur(s.session_uptime_s) : "—";
+  $("m-fps").textContent = live ? num(s.fps) : "—";
+  $("m-pps").textContent = live ? num(s.pps) : "—";
+  $("m-loss").textContent = live && s.loss_pct != null ? num(s.loss_pct, 1) + "%" : "—";
+  $("m-viewers").textContent = s.online ? num(s.relay_viewers) : "—";
+  $("m-outputs").textContent = s.online ? `${num(s.outputs_live)} / ${num(s.mirrors)}` : "—";
+
+  for (const [k, id] of [["24h", "24"], ["7d", "7"]]) {
+    const a = (s.availability || {})[k] || {};
+    $("a" + id).textContent = a.pct == null ? "chưa có dữ liệu" : num(a.pct, 2) + "%";
+    $("b" + id).style.width = (a.pct || 0) + "%";
+    $("d" + id).textContent = a.pct == null ? "" : `chiếu ${fmtDur(a.up_s)}, gián đoạn ${fmtDur(a.down_s)}`;
+  }
+  drawChart(s.series || [], s.now);
+  drawIncidents(s.incidents || [], s.now);
+}
+
+function drawChart(series, now) {
+  const W = 720, H = 160, P = 8, t0 = now - 3600;
+  const x = t => (t - t0) / 3600 * W;
+  const max = Math.max(200, ...series.map(p => p.pps || 0)) * 1.1;
+  const y = v => H - P - v / max * (H - 2 * P);
+  let bands = "", path = "", pen = false;
+  for (let i = 0; i < series.length; i++) {
+    const p = series[i], next = series[i + 1];
+    const w = Math.max(1, x(next ? next.t : p.t + 5) - x(p.t));
+    if (p.state !== "relaying" && p.state !== "idle" && p.state !== "disabled")
+      bands += `<rect x="${x(p.t).toFixed(1)}" y="0" width="${w.toFixed(1)}" height="${H}" fill="var(--band)"/>`;
+    if (p.pps != null && p.state === "relaying") {
+      path += (pen ? "L" : "M") + x(p.t).toFixed(1) + " " + y(p.pps).toFixed(1);
+      pen = true;
+    } else pen = false;
+  }
+  const grid = [0.25, 0.5, 0.75].map(f => `<line x1="0" x2="${W}" y1="${y(max * f / 1.1)}" y2="${y(max * f / 1.1)}" stroke="var(--line)" stroke-width="1"/>` +
+    `<text x="4" y="${y(max * f / 1.1) - 3}" font-size="10" fill="var(--muted)">${Math.round(max * f / 1.1)}</text>`).join("");
+  $("chart").innerHTML = bands + grid + `<path d="${path}" fill="none" stroke="var(--chart)" stroke-width="1.6" vector-effect="non-scaling-stroke"/>`;
+}
+
+function drawIncidents(list, now) {
+  if (!list.length) { $("incidents").innerHTML = `<tr><td colspan="4" class="muted">Chưa ghi nhận sự cố nào</td></tr>`; return; }
+  $("incidents").innerHTML = list.slice(0, 20).map(i => {
+    const kind = KINDS[i.kind] || i.kind;
+    const why = REASONS[i.reason] ? ` (${REASONS[i.reason]})` : "";
+    const dur = i.kind === "restart" ? "—" : fmtDur((i.ongoing ? now : i.end) - i.start);
+    const res = i.ongoing ? `<span class="tag warn">đang diễn ra</span>`
+      : i.kind === "restart" ? `<span class="tag idle">khởi động lại</span>`
+      : i.recovered ? `<span class="tag ok">tự hồi phục</span>`
+      : i.by_restart ? `<span class="tag bad">phải khởi động lại</span>` : `<span class="tag idle">target ngừng live</span>`;
+    return `<tr><td>${fmtTime(i.start)}</td><td>${dur}</td><td>${kind}${why}</td><td>${res}</td></tr>`;
+  }).join("");
+}
+
+async function tick() {
+  try {
+    const r = await fetch("api/status", { cache: "no-store" });
+    if (r.ok) render(await r.json());
+  } catch (e) {
+    $("updated").textContent = "Mất kết nối tới trang trạng thái, đang thử lại…";
+  }
+}
+document.querySelectorAll(".cmd code").forEach(c => c.addEventListener("click", () => {
+  const t = c.textContent;
+  navigator.clipboard?.writeText(t).then(() => { c.textContent = "Đã sao chép"; setTimeout(() => c.textContent = t, 900); });
+}));
+tick();
+setInterval(tick, 5000);
+</script>
+</body>
+</html>

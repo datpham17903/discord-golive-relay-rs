@@ -1,0 +1,18 @@
+# Public read-only status page; expose 127.0.0.1:8787 through a Cloudflare Tunnel.
+[Unit]
+Description=Discord relay status dashboard
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/relay-dashboard/dashboard.py --status /var/lib/discord-relay/status.json --log /opt/discord-relay-rs/relay.log --data /var/lib/relay-dashboard --listen 127.0.0.1:8787
+Restart=always
+RestartSec=5
+DynamicUser=yes
+StateDirectory=relay-dashboard
+ReadOnlyPaths=/var/lib/discord-relay /opt/discord-relay-rs
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

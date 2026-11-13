@@ -627,8 +627,8 @@ fn test_a09_target_moves_while_relaying() {
 #[test]
 fn test_a09_target_moves_while_hold() {
     let mut sup = make();
-    relaying(&mut sup, 0.0);
-    sup.handle(gw(GatewayState::Resuming), 2.0);
+    let (g, e) = relaying(&mut sup, 0.0);
+    sup.handle(worker_failed(g, e), 2.0);
     let acts = sup.handle(target_changed(Some(tv(OTHER, true))), 2.5);
     assert!(has_teardown_reason(&acts, StopReason::SourceLeftWhitelist));
 }
@@ -738,24 +738,25 @@ fn test_idle_restart_within_grace_does_not_leave() {
 // ------------------------------------------------------------ gateway
 
 #[test]
-fn test_a12_resume_holds_then_reopens_with_fresh_frame() {
+fn test_a12_resume_while_relaying_keeps_the_gate_open() {
     let mut sup = make();
-    let (g, e) = relaying(&mut sup, 0.0);
+    let (g, e) = relaying(&mut sup, 0.0); // last progress at 0.75
     let acts = sup.handle(gw(GatewayState::Resuming), 2.0);
-    assert!(has_close_gate_first(&acts));
-    assert!(has!(
+    assert!(!has!(
         &acts,
-        Action::ShowSlate { generation, reason: HoldReason::GatewayResume } if *generation == g
+        Action::CloseGate { .. } | Action::ShowSlate { .. }
     ));
-    let st = sup.status(2.0);
-    assert!(st.state == RelayState::Hold && st.hold_deadline == Some(17.0));
-    assert!(!sup.gate_allows(g, e, 2.0));
-    sup.handle(gw(GatewayState::Fresh), 3.0);
-    assert!(!sup.gate_allows(g, e, 3.0)); // frame since hold still required
-    sup.handle(progress(g, 3.1), 3.1);
-    let acts = sup.handle(fresh_frame(g, e), 3.2);
-    assert!(has_open_gate_for(&acts, g, e));
-    assert!(sup.gate_allows(g, e, 3.2));
+    assert_eq!(sup.status(2.0).state, RelayState::Relaying);
+    assert!(sup.gate_allows(g, e, 2.0));
+    // media loss during the resume still holds, as no media
+    let acts = tick(&mut sup, 5.875);
+    assert!(has_slate(&acts, HoldReason::NoMedia));
+    assert!(!sup.gate_allows(g, e, 5.875));
+    sup.handle(progress(g, 6.0), 6.0);
+    let acts = sup.handle(fresh_frame(g, e), 6.1);
+    assert!(has_open_gate_for(&acts, g, e)); // reopens while still resuming
+    sup.handle(gw(GatewayState::Fresh), 7.0);
+    assert!(sup.gate_allows(g, e, 7.0));
 }
 
 #[test]
@@ -775,6 +776,7 @@ fn test_hold_deadline_is_fixed_and_expires() {
     let mut sup = make();
     let (g, e) = relaying(&mut sup, 0.0);
     sup.handle(gw(GatewayState::Resuming), 2.0);
+    sup.handle(worker_failed(g, e), 2.0);
     sup.handle(worker_failed(g, e), 10.0);
     assert_eq!(sup.status(10.0).hold_deadline, Some(17.0));
     let acts = tick(&mut sup, 17.0);
@@ -801,10 +803,10 @@ fn test_invalid_gateway_stops_and_new_session_snapshot_stops() {
 fn test_a20_disable_keeps_quarantine_and_never_publishes() {
     for where_ in ["hold", "backoff", "quarantine"] {
         let mut sup = make();
-        let (g, _) = relaying(&mut sup, 0.0);
+        let (g, e) = relaying(&mut sup, 0.0);
         match where_ {
             "hold" => {
-                sup.handle(gw(GatewayState::Resuming), 2.0);
+                sup.handle(worker_failed(g, e), 2.0);
             }
             "backoff" => {
                 sup.handle(connect_failed(g, StopReason::ConnectFailed, true), 2.0);

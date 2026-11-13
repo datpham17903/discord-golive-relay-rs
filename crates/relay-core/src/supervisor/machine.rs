@@ -433,7 +433,17 @@ impl Supervisor {
             desired_enabled: self.desired_enabled,
             // no revocation event exists; consent loss arrives as disable
             source_authorization_valid: true,
-            gateway_state: self.gateway,
+            // The watch and the relay output run on their own voice/stream connections: a
+            // resuming main gateway does not interrupt them, and closing the gate for it blanked
+            // every viewer for as long as the resume took (prod 2026-11-14, >75 s). Media loss
+            // during the resume still fails `liveness`; a lost session (Invalid) still fails here.
+            gateway_state: if self.gateway == GatewayState::Resuming
+                && matches!(self.state, RelayState::Relaying | RelayState::Hold)
+            {
+                GatewayState::Fresh
+            } else {
+                self.gateway
+            },
             excluded_viewer_ids: self.cfg.excluded_viewer_ids.clone(),
             participant_view_fresh: self.participants.is_some(),
             participants: self.participants.clone().unwrap_or_default(),

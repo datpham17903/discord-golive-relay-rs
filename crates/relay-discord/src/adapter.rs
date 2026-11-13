@@ -337,9 +337,19 @@ impl Inner {
     fn on_gateway_event(&self, event: GatewayEvent) {
         match event {
             GatewayEvent::Dispatch(dispatch) => self.handle_dispatch(&dispatch),
-            GatewayEvent::Disconnected { .. } => self.emit(model(Event::GatewayChanged {
-                state: GatewayState::Resuming,
-            })),
+            GatewayEvent::Disconnected {
+                code,
+                reason,
+                resume,
+            } => {
+                self.log(
+                    "gateway_disconnected",
+                    json!({"code": code, "reason": reason, "resume": resume}),
+                );
+                self.emit(model(Event::GatewayChanged {
+                    state: GatewayState::Resuming,
+                }));
+            }
             GatewayEvent::Closed(error) => self.on_gateway_closed(&error),
         }
     }
@@ -391,9 +401,12 @@ impl Inner {
         let mut own_observed = None;
         match d.name.as_str() {
             "READY_SUPPLEMENTAL" => self.on_ready(&mut out),
-            "RESUMED" => out.push(model(Event::GatewayChanged {
-                state: GatewayState::Fresh,
-            })),
+            "RESUMED" => {
+                self.log("gateway_resumed", json!({}));
+                out.push(model(Event::GatewayChanged {
+                    state: GatewayState::Fresh,
+                }));
+            }
             "STREAM_CREATE" => {
                 if let Some(CacheChange::Stream {
                     after: Some(stream),

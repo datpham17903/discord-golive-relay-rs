@@ -100,7 +100,8 @@ impl GatewayConfig {
             api_version: API_VERSION,
             compress: true,
             heartbeat_timeout: Duration::from_secs(60),
-            connect_timeout: Duration::from_secs(60),
+            // a hung RESUME attempt is retried after this; the relay keeps playing meanwhile
+            connect_timeout: Duration::from_secs(15),
         }
     }
 }

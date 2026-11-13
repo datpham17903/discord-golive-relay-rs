@@ -125,6 +125,9 @@ pub trait Adapter: Send + Sync {
     fn reply(&self, channel_id: u64, message_id: u64, text: String) -> ApiFuture<'_, ()>;
     fn voice_channel_ids(&self) -> HashSet<u64>;
     fn display_name(&self, user_id: u64) -> Option<String>;
+    fn channel_name(&self, _channel_id: u64) -> Option<String> {
+        None
+    }
     fn is_bot(&self, user_id: u64) -> bool;
     fn role_name(&self, role_id: u64) -> Option<String>;
 

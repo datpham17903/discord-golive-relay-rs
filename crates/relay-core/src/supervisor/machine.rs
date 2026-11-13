@@ -188,6 +188,8 @@ pub struct Supervisor {
     leave_at: Option<f64>,
     debounce_since: Option<f64>,
     backoff_until: Option<f64>,
+    /// First failure of the current run of `stream_full` connect refusals.
+    stream_full_since: Option<f64>,
     closed: bool,
     state: RelayState,
     // Per-session fields, reset by `reset_session`.
@@ -251,6 +253,7 @@ impl Supervisor {
             leave_at: None,
             debounce_since: None,
             backoff_until: None,
+            stream_full_since: None,
             closed: false,
             state: RelayState::Idle,
             baseline: None,
@@ -386,6 +389,10 @@ impl Supervisor {
             voice_session_baseline: self.baseline.clone(),
             last_source_progress_age: self.liveness.age(now),
             gate_failed: failed,
+            stream_full_s: self
+                .stream_full_since
+                .filter(|_| matches!(self.state, RelayState::Backoff | RelayState::Connecting))
+                .map(|since| now - since),
         }
     }
 
@@ -647,6 +654,7 @@ impl Supervisor {
             Event::Watching { generation } if self.cur(generation) => {
                 self.watching = true;
                 self.inbound = true;
+                self.stream_full_since = None;
                 self.mark_ready(now);
             }
             Event::FirstFrame {
@@ -682,6 +690,11 @@ impl Supervisor {
                 detail,
                 watch_retry,
             } if self.cur(generation) => {
+                if detail.contains("stream_full") {
+                    self.stream_full_since.get_or_insert(now);
+                } else {
+                    self.stream_full_since = None;
+                }
                 self.stop(
                     reason,
                     now,

@@ -1574,6 +1574,14 @@ impl Adapter for DiscordAdapter {
             .display_name(self.inner.opts.guild_id, user_id)
     }
 
+    fn channel_name(&self, channel_id: u64) -> Option<String> {
+        self.inner
+            .cache
+            .read()
+            .channel_name(self.inner.opts.guild_id, channel_id)
+            .map(str::to_owned)
+    }
+
     fn is_bot(&self, user_id: u64) -> bool {
         self.inner.cache.read().is_bot(user_id)
     }

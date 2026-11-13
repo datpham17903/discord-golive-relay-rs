@@ -4,7 +4,7 @@
 //! Python called `_handle` synchronously from the fake adapter; here adapter events go through the
 //! service's event queue, so the tests `flush()` it where Python asserted right after an event.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -189,6 +189,7 @@ struct FakeAdapter {
     replies: Mutex<Vec<(u64, u64, String)>>,
     snap: Mutex<Option<Event>>,
     voice_ids: Mutex<HashSet<u64>>,
+    names: Mutex<HashMap<u64, String>>,
     alive: AtomicBool,
     foreign: AtomicBool,
     last_vsu: Mutex<Option<String>>,
@@ -218,6 +219,7 @@ impl FakeAdapter {
             replies: Mutex::new(Vec::new()),
             snap: Mutex::new(None),
             voice_ids: Mutex::new(HashSet::new()),
+            names: Mutex::new(HashMap::new()),
             alive: AtomicBool::new(true),
             foreign: AtomicBool::new(false),
             last_vsu: Mutex::new(None),
@@ -343,8 +345,12 @@ impl Adapter for FakeAdapter {
         self.voice_ids.lock().clone()
     }
 
-    fn display_name(&self, _user_id: u64) -> Option<String> {
-        None
+    fn display_name(&self, user_id: u64) -> Option<String> {
+        self.names.lock().get(&user_id).cloned()
+    }
+
+    fn channel_name(&self, channel_id: u64) -> Option<String> {
+        self.names.lock().get(&channel_id).cloned()
     }
 
     fn is_bot(&self, _user_id: u64) -> bool {
@@ -1445,6 +1451,34 @@ service_test!(test_status_network_only_when_enabled, async {
         json!({"watch": {"video_sequence_gaps": 3}})
     );
 });
+
+service_test!(
+    test_status_names_cover_target_accounts_and_channels,
+    async {
+        let (uid, mirror_chan) = (424242, 999);
+        let env = env(multi(uid, AccountRole::Mirror));
+        let task = env.reach_relaying().await;
+        let a = env.adapter(0);
+        a.set_voice_ids(&[env.chan, mirror_chan]);
+        env.op(&format!("!relay mirror {mirror_chan}"), 900).await;
+        wait_until(|| env.out(uid).is_some_and(|o| o.published_to(mirror_chan))).await;
+        let target = env.svc.status_dict()["routing"]["target_user_id"]
+            .as_u64()
+            .unwrap();
+        *a.names.lock() = HashMap::from([
+            (target, "Target".to_owned()),
+            (uid, "Bot".to_owned()),
+            (env.chan, "Main".to_owned()),
+            (mirror_chan, "Mirror".to_owned()),
+        ]);
+        let names = env.svc.status_dict()["names"].clone();
+        assert_eq!(names["users"][target.to_string()], json!("Target"));
+        assert_eq!(names["users"][uid.to_string()], json!("Bot"));
+        assert_eq!(names["channels"][env.chan.to_string()], json!("Main"));
+        assert_eq!(names["channels"]["999"], json!("Mirror"));
+        env.shutdown(task).await;
+    }
+);
 
 service_test!(test_status_exposes_audio_counters, async {
     let env = env(Setup::default());
@@ -3471,4 +3505,9 @@ service_test!(test_codec_stall_watchdog_reswaps_silent_output, async {
     // unbound: the controller swaps it again
     assert!(env.svc.with_codec(|c| c.bound_outputs().is_empty()));
     assert_eq!(env.shutdown(task).await, 0);
+});
+
+service_test!(test_status_stream_full_key_null_by_default, async {
+    let env = env(Setup::default());
+    assert!(env.svc.status_dict()["stream_full_s"].is_null());
 });

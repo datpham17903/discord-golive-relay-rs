@@ -1282,3 +1282,14 @@ fn test_status_verbose_survives_trimming() {
     assert!(s.chars().count() < 2000);
     assert!(s.contains("### 📊 Kỹ thuật") && s.contains("> **Ingest** · 1,3 Mbps"));
 }
+
+#[test]
+fn test_status_stream_full_line() {
+    let full = StatusDetails {
+        stream_full_s: Some(90.0),
+        ..details()
+    };
+    let s = fmt(&routing(&[]), &ctx(), &full);
+    assert!(s.contains("Stream của target đã đầy slot") && s.contains("nhường slot"));
+    assert!(!fmt(&routing(&[]), &ctx(), &details()).contains("đầy slot"));
+}

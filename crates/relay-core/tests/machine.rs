@@ -2006,3 +2006,37 @@ fn test_machine_adaptive_accepts_h265_ready() {
         StopReason::CodecMismatch
     ));
 }
+
+#[test]
+fn test_stream_full_since_set_and_cleared() {
+    let mut sup = make();
+    let (g, _) = start(&mut sup, 0.0);
+    sup.handle(
+        connect_failed_detail(
+            g,
+            StopReason::ConnectFailed,
+            true,
+            "rejected: stream_full",
+            false,
+        ),
+        1.0,
+    );
+    let st = sup.status(4.0);
+    assert!(st.state == RelayState::Backoff && st.stream_full_s == Some(3.0));
+    // a different failure clears it
+    let mut sup = make();
+    let (g, _) = start(&mut sup, 0.0);
+    sup.handle(connect_failed(g, StopReason::ConnectFailed, true), 1.0);
+    assert_eq!(sup.status(4.0).stream_full_s, None);
+    // watching on the next attempt clears it
+    let mut sup = make();
+    let (g, _) = start(&mut sup, 0.0);
+    sup.handle(
+        connect_failed_detail(g, StopReason::ConnectFailed, true, "stream_full", false),
+        1.0,
+    );
+    let (g, _, _) = find_start(&tick(&mut sup, 60.0));
+    sup.handle(joined(g, "s1"), 60.5);
+    sup.handle(watching(g), 60.5);
+    assert_eq!(sup.status(61.0).stream_full_s, None);
+}

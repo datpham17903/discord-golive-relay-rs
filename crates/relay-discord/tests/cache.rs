@@ -295,6 +295,24 @@ fn unavailable_delete_of_unknown_stream_creates_a_flagged_stub() {
     assert!(s.unavailable);
 }
 
+#[test]
+fn channel_names_kept_updated_and_removed() {
+    let mut cache = Cache::new();
+    cache.apply(
+        "GUILD_CREATE",
+        &json!({"id": "1", "channels": [{"id": "70", "type": 2, "name": "Lounge"}, {"id": "71", "type": 2}]}),
+    );
+    assert_eq!(cache.channel_name(1, 70), Some("Lounge"));
+    assert_eq!(cache.channel_name(1, 71), None);
+    cache.apply(
+        "CHANNEL_UPDATE",
+        &json!({"guild_id": "1", "id": "70", "type": 2, "name": "Den"}),
+    );
+    assert_eq!(cache.channel_name(1, 70), Some("Den"));
+    cache.apply("CHANNEL_DELETE", &json!({"guild_id": "1", "id": "70"}));
+    assert_eq!(cache.channel_name(1, 70), None);
+}
+
 fn guild_with_directory() -> Cache {
     let mut cache = Cache::new();
     cache.apply(

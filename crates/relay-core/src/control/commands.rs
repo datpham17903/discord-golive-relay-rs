@@ -235,6 +235,8 @@ pub struct StatusDetails {
     pub tech: Option<Vec<TechRow>>,
     /// Source frames lost this session.
     pub gap_frames: Option<u32>,
+    /// Seconds the target's Go Live has been full; `None` = not full.
+    pub stream_full_s: Option<f64>,
 }
 
 impl Default for StatusDetails {
@@ -268,6 +270,7 @@ impl Default for StatusDetails {
             codec_switch: None,
             tech: None,
             gap_frames: None,
+            stream_full_s: None,
         }
     }
 }
@@ -1067,6 +1070,9 @@ pub fn format_status(
     }
     if !sub.is_empty() {
         head.push(format!("-# {}", sub.join(" · ")));
+    }
+    if let Some(s) = d.stream_full_s {
+        head.push(format!("🈵 **Stream của target đã đầy slot** ({}) — bot đang chờ chỗ trống. **Cần một người đang xem stream của target thoát ra để nhường slot.**", dur(Some(s))));
     }
     if routing_error.is_some() {
         head.push("⚠️ **state.json có routing không hợp lệ** (đang bị bỏ qua); relay sẽ dừng ở lần khởi động sau.".to_string());

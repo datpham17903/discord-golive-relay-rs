@@ -213,8 +213,8 @@ struct UserInfo {
 struct GuildCache {
     voice_states: HashMap<u64, VoiceStateEntry>,
     unavailable: bool,
-    /// Channel id -> channel type.
-    channels: HashMap<u64, u64>,
+    /// Channel id -> (channel type, name).
+    channels: HashMap<u64, (u64, Option<String>)>,
     roles: HashMap<u64, String>,
     /// Members seen so far (guild payload, member events, messages, voice states) -> nickname.
     members: HashMap<u64, Option<String>>,
@@ -308,7 +308,7 @@ impl Cache {
         self.guilds.get(&guild_id).map_or_else(Vec::new, |g| {
             g.channels
                 .iter()
-                .filter(|(_, kind)| **kind == VOICE_CHANNEL)
+                .filter(|(_, (kind, _))| *kind == VOICE_CHANNEL)
                 .map(|(id, _)| *id)
                 .collect()
         })
@@ -318,7 +318,16 @@ impl Cache {
         self.guilds
             .get(&guild_id)
             .and_then(|g| g.channels.get(&channel_id))
-            .is_some_and(|kind| *kind == VOICE_CHANNEL)
+            .is_some_and(|(kind, _)| *kind == VOICE_CHANNEL)
+    }
+
+    pub fn channel_name(&self, guild_id: u64, channel_id: u64) -> Option<&str> {
+        self.guilds
+            .get(&guild_id)?
+            .channels
+            .get(&channel_id)?
+            .1
+            .as_deref()
     }
 
     pub fn role_name(&self, guild_id: u64, role_id: u64) -> Option<&str> {
@@ -486,8 +495,8 @@ impl Cache {
             .into_iter()
             .flatten()
         {
-            if let Some((cid, kind)) = parse_channel(channel) {
-                guild.channels.insert(cid, kind);
+            if let Some((cid, info)) = parse_channel(channel) {
+                guild.channels.insert(cid, info);
             }
         }
         for role in data
@@ -547,8 +556,8 @@ impl Cache {
     }
 
     fn on_channel_upsert(&mut self, data: &Value) {
-        if let (Some(guild), Some((id, kind))) = (self.guild_mut(data), parse_channel(data)) {
-            guild.channels.insert(id, kind);
+        if let (Some(guild), Some((id, info))) = (self.guild_mut(data), parse_channel(data)) {
+            guild.channels.insert(id, info);
         }
     }
 
@@ -765,10 +774,16 @@ impl Cache {
     }
 }
 
-fn parse_channel(channel: &Value) -> Option<(u64, u64)> {
+fn parse_channel(channel: &Value) -> Option<(u64, (u64, Option<String>))> {
     Some((
         channel.get("id").and_then(snowflake)?,
-        channel.get("type").and_then(Value::as_u64)?,
+        (
+            channel.get("type").and_then(Value::as_u64)?,
+            channel
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        ),
     ))
 }
 

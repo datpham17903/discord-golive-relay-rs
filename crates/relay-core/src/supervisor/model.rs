@@ -441,4 +441,6 @@ pub struct StatusSnapshot {
     pub voice_session_baseline: Option<String>,
     pub last_source_progress_age: Option<f64>,
     pub gate_failed: Vec<&'static str>,
+    /// Seconds the target's Go Live has refused us as full (`stream_full`); `None` = not full.
+    pub stream_full_s: Option<f64>,
 }

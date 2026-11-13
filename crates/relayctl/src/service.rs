@@ -3676,6 +3676,30 @@ impl Service {
             d.insert("network".into(), net);
         }
         d.insert("accounts".into(), Value::Array(accounts));
+        let mut users = BTreeSet::from([
+            routing.target_user_id,
+            self.cfg.discord.expected_relay_user_id,
+        ]);
+        let mut channels = BTreeSet::from([routing.channel_id]);
+        channels.extend(routing.mirrors.keys().copied());
+        for m in d["accounts"].as_array().into_iter().flatten() {
+            users.extend(m["account"].as_u64());
+            channels.extend(m["channel_id"].as_u64());
+        }
+        let mut names = json!({"users": {}, "channels": {}});
+        if let Some(a) = c.adapter.as_ref() {
+            for id in users {
+                if let Some(n) = a.display_name(id) {
+                    names["users"][id.to_string()] = json!(n);
+                }
+            }
+            for id in channels {
+                if let Some(n) = a.channel_name(id) {
+                    names["channels"][id.to_string()] = json!(n);
+                }
+            }
+        }
+        d.insert("names".into(), names);
         let details = self.status_details_locked(c, now, false);
         let details = details_json(&details, self.cfg.codecs.video_mode.as_str());
         d.insert("codec".into(), details["codec"].clone());
@@ -3884,6 +3908,7 @@ impl Service {
             },
             tech: verbose.then(|| self.tech_rows(c, now)),
             gap_frames,
+            stream_full_s: self.sup.lock().status(wall_clock()).stream_full_s,
         }
     }
 
@@ -4271,6 +4296,7 @@ fn snapshot_json(s: &StatusSnapshot) -> Map<String, Value> {
         json!(s.last_source_progress_age),
     );
     d.insert("gate_failed".into(), json!(s.gate_failed));
+    d.insert("stream_full_s".into(), json!(s.stream_full_s));
     d
 }
 

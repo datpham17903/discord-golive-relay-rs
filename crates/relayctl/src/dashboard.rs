@@ -97,6 +97,79 @@ fn rates(p: &Prev, c: &Prev) -> Option<(f64, f64, f64)> {
     }
 }
 
+/// Id of a JSON number or string, as the string key used by `names` and `routing.mirrors`.
+fn id_str(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// target / channel / outputs / mirror_list / free_mirrors from a status.json. Names come from the
+/// optional top-level `names` and are null when unknown; user ids are never emitted.
+fn topology(s: &Value) -> Map<String, Value> {
+    let name = |kind: &str, id: Option<String>| -> Value {
+        id.and_then(|id| s["names"][kind][id.as_str()].as_str().map(Value::from))
+            .unwrap_or(Value::Null)
+    };
+    let routing = &s["routing"];
+    let mirrors = routing["mirrors"].as_object();
+    let assigned: Vec<String> = mirrors
+        .map(|m| m.values().filter_map(id_str).collect())
+        .unwrap_or_default();
+    let rows = s["details"]["accounts"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    let mut outputs = Vec::new();
+    let mut free = 0;
+    for r in rows {
+        let (id, role, state) = (id_str(&r[0]), r[1].as_str(), r[3].as_str());
+        let channel_id = id_str(&r[2]);
+        if role == Some("mirror")
+            && state == Some("off")
+            && id.as_ref().is_some_and(|id| !assigned.contains(id))
+        {
+            free += 1;
+        }
+        outputs.push(json!({
+            "name": name("users", id),
+            "role": role,
+            "state": state,
+            "channel": name("channels", channel_id.clone()),
+            "channel_id": channel_id,
+            "viewers": r[5],
+            "uptime_s": r[4],
+        }));
+    }
+    let mirror_list: Vec<Value> = mirrors
+        .map(|m| {
+            m.iter()
+                .map(|(ch, acc)| {
+                    json!({
+                        "channel": name("channels", Some(ch.clone())),
+                        "channel_id": ch,
+                        "account": name("users", id_str(acc)),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = Map::new();
+    out.insert(
+        "target".into(),
+        json!({"name": name("users", id_str(&routing["target_user_id"]))}),
+    );
+    out.insert(
+        "channel".into(),
+        json!({"name": name("channels", id_str(&routing["channel_id"]))}),
+    );
+    out.insert("outputs".into(), Value::Array(outputs));
+    out.insert("mirror_list".into(), Value::Array(mirror_list));
+    out.insert("free_mirrors".into(), json!(free));
+    out
+}
+
 struct State {
     series: VecDeque<Value>,
     prev: Option<Prev>,
@@ -253,6 +326,7 @@ impl Collector {
                     ("hold_reason", s["hold_reason"].clone()),
                     ("enabled", s["desired_enabled"].clone()),
                     ("codec", s["codec"].clone()),
+                    ("stream_full_s", s["stream_full_s"].clone()),
                     ("session_uptime_s", s["details"]["session_uptime_s"].clone()),
                     ("channel_members", s["details"]["viewers"].clone()),
                     (
@@ -273,6 +347,7 @@ impl Collector {
                 ] {
                     snap.insert(k.into(), v);
                 }
+                snap.extend(topology(&s));
                 sample =
                     json!({"t": now, "state": s["state"], "pps": pps, "fps": fps, "loss": loss});
             }
@@ -654,6 +729,20 @@ mod tests {
     }
 
     #[test]
+    fn stream_full_is_passed_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = collector(dir.path());
+        let mut s = status(1, 0, 1);
+        s["stream_full_s"] = json!(42.5);
+        c.poll_status(100.0, Some((s, 1.0)));
+        assert_eq!(c.st.lock().snapshot["stream_full_s"], 42.5);
+        c.poll_status(105.0, Some((status(1, 0, 1), 1.0)));
+        assert!(c.st.lock().snapshot["stream_full_s"].is_null());
+        c.poll_status(110.0, None);
+        assert!(!c.st.lock().snapshot.contains_key("stream_full_s"));
+    }
+
+    #[test]
     fn rate_deltas_and_counter_reset() {
         let dir = tempfile::tempdir().unwrap();
         let c = collector(dir.path());
@@ -700,5 +789,60 @@ mod tests {
         let again = collector(dir.path());
         assert_eq!(again.st.lock().transitions.len(), 2);
         assert!(again.st.lock().open_incident.is_some());
+    }
+
+    fn topo_status(with_names: bool) -> Value {
+        let mut s = json!({
+            "state": "relaying",
+            "routing": {"target_user_id": "11", "channel_id": "500",
+                        "mirrors": {"501": 22}},
+            "details": {"accounts": [
+                [21, "relay", 500, "live", 90.5, 4],
+                [22, "mirror", 501, "live", 30.0, 1],
+                [23, "mirror", null, "off", null, null],
+                [24, "mirror", null, "off", null, null],
+                [25, "mirror", null, "starting", null, null],
+            ]},
+        });
+        if with_names {
+            s["names"] = json!({"users": {"11": "Tai", "21": "Relay1", "22": "Mir<b>"},
+                                "channels": {"500": "Main", "501": "Side"}});
+        }
+        s
+    }
+
+    #[test]
+    fn topology_with_names() {
+        let t = topology(&topo_status(true));
+        assert_eq!(t["target"], json!({"name": "Tai"}));
+        assert_eq!(t["channel"], json!({"name": "Main"}));
+        assert_eq!(t["free_mirrors"], 2);
+        assert_eq!(
+            t["mirror_list"],
+            json!([{"channel": "Side", "channel_id": "501", "account": "Mir<b>"}])
+        );
+        let o = t["outputs"].as_array().unwrap();
+        assert_eq!(o.len(), 5);
+        assert_eq!(
+            o[0],
+            json!({"name": "Relay1", "role": "relay", "state": "live", "channel": "Main",
+                   "channel_id": "500", "viewers": 4, "uptime_s": 90.5})
+        );
+        assert_eq!(o[2]["name"], Value::Null);
+        assert_eq!(o[2]["channel_id"], Value::Null);
+        // no account id leaks
+        let text = Value::Object(t).to_string();
+        assert!(!text.contains("\"account\":22") && !text.contains("\"11\""));
+    }
+
+    #[test]
+    fn topology_without_names_falls_back_to_null() {
+        let t = topology(&topo_status(false));
+        assert_eq!(t["target"], json!({"name": null}));
+        assert_eq!(t["channel"], json!({"name": null}));
+        assert_eq!(t["outputs"][1]["channel"], Value::Null);
+        assert_eq!(t["outputs"][1]["channel_id"], "501");
+        assert_eq!(t["mirror_list"][0]["account"], Value::Null);
+        assert_eq!(t["free_mirrors"], 2);
     }
 }

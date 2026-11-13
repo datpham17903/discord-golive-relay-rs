@@ -71,6 +71,19 @@ th { color: var(--muted); font-weight: 600; border-top: 0; }
         <div class="muted" id="state-sub"></div>
       </div>
     </div>
+    <div class="note" id="full" hidden style="border-left-color: var(--warn)"></div>
+  </section>
+
+  <section class="card">
+    <div id="who">—</div>
+    <div style="overflow-x:auto;margin-top:8px">
+      <table>
+        <thead><tr><th>Tài khoản</th><th>Vai trò</th><th>Trạng thái</th><th>Kênh</th><th>Người xem</th></tr></thead>
+        <tbody id="outputs"><tr><td colspan="5" class="muted">Chưa có dữ liệu</td></tr></tbody>
+      </table>
+    </div>
+    <div style="margin-top:8px" id="mirror-list"></div>
+    <div id="mirror-free"></div>
   </section>
 
   <section class="card">
@@ -153,6 +166,7 @@ const fmtDur = s => {
   return `${x} giây`;
 };
 const fmtTime = ts => new Date(ts * 1000).toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
+const esc = v => String(v).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const num = (v, d = 0) => v == null ? "—" : v.toLocaleString("vi-VN", { maximumFractionDigits: d, minimumFractionDigits: d });
 
 function render(s) {
@@ -169,6 +183,12 @@ function render(s) {
     if (s.codec && s.state === "relaying") parts.push("codec " + s.codec);
     sub = parts.join(" · ");
   }
+  const full = s.online && s.stream_full_s != null;
+  if (full) {
+    [label, cls, sub] = ["Stream của target đã đầy slot", "warn", ""];
+    $("full").innerHTML = `<b>Bot đang chờ chỗ trống được ${esc(fmtDur(s.stream_full_s))}. Cần một người đang xem stream của target thoát ra để nhường slot.</b>`;
+  }
+  $("full").hidden = !full;
   $("dot").className = "dot " + cls;
   $("state").textContent = label;
   $("state-sub").textContent = sub;
@@ -187,8 +207,25 @@ function render(s) {
     $("b" + id).style.width = (a.pct || 0) + "%";
     $("d" + id).textContent = a.pct == null ? "" : `chiếu ${fmtDur(a.up_s)}, gián đoạn ${fmtDur(a.down_s)}`;
   }
+  drawTopology(s);
   drawChart(s.series || [], s.now);
   drawIncidents(s.incidents || [], s.now);
+}
+
+function drawTopology(s) {
+  const nm = o => o && o.name != null ? esc(o.name) : "—";
+  $("who").innerHTML = s.online ? `Target: <b>${nm(s.target)}</b> · Kênh chính: <b>${nm(s.channel)}</b>` : "—";
+  const OUT = { live: "Đang phát", off: "Nghỉ" };
+  const outs = s.online ? s.outputs || [] : [];
+  $("outputs").innerHTML = outs.length ? outs.map(o => `<tr><td>${o.name != null ? esc(o.name) : "—"}</td>` +
+    `<td>${o.role === "mirror" ? "mirror" : "relay"}</td><td>${esc(OUT[o.state] || o.state || "—")}</td>` +
+    `<td>${o.channel != null ? esc(o.channel) : o.channel_id != null ? esc(o.channel_id) : "—"}</td>` +
+    `<td>${o.viewers == null ? "—" : num(o.viewers)}</td></tr>`).join("")
+    : `<tr><td colspan="5" class="muted">Chưa có dữ liệu</td></tr>`;
+  const ml = s.online ? s.mirror_list || [] : [];
+  $("mirror-list").innerHTML = "Mirror đang chạy: " + (ml.length ? ml.map(m =>
+    `${m.channel != null ? esc(m.channel) : "—"} <small class="muted">${esc(m.channel_id)}</small>`).join(", ") : "chưa có");
+  $("mirror-free").textContent = "Mirror trống: " + (s.online && s.free_mirrors != null ? s.free_mirrors : "—") + " tài khoản";
 }
 
 function drawChart(series, now) {

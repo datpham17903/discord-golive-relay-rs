@@ -942,15 +942,20 @@ fn test_keyframe_recovery_order_pli_rewatch_wait() {
 }
 
 #[test]
-fn test_default_recovery_repeats_pli_and_never_rewatches() {
+fn test_default_recovery_is_pli_then_repair_then_pli_repeats_and_never_rewatches() {
     let mut sup = make_cfg(|c| c.keyframe_step_seconds = 3.0);
     let (g, e) = relaying(&mut sup, 0.0);
     let acts = sup.handle(worker_failed(g, e), 2.0);
     assert!(has_keyframe(&acts, KeyframeMethod::Pli));
-    for t in [5.0, 8.0, 11.0, 14.0] {
+    sup.handle(progress(g, 4.9), 4.9);
+    let acts = tick(&mut sup, 5.0);
+    assert!(has_keyframe(&acts, KeyframeMethod::Repair));
+    assert!(!has_keyframe(&acts, KeyframeMethod::Pli));
+    for t in [8.0, 11.0, 14.0] {
         sup.handle(progress(g, t - 0.1), t - 0.1);
         let acts = tick(&mut sup, t);
         assert!(has_keyframe(&acts, KeyframeMethod::Pli), "t={t}");
+        assert!(!has_keyframe(&acts, KeyframeMethod::Repair), "t={t}");
         assert!(!has_keyframe(&acts, KeyframeMethod::Rewatch), "t={t}");
     }
 }
@@ -971,9 +976,13 @@ fn test_hold_deadline_with_live_source_keeps_the_session() {
     let st = sup.status(17.0);
     assert_eq!(st.state, RelayState::Hold);
     assert_eq!(st.hold_deadline, Some(32.0));
-    // still only PLI, never a rewatch
+    // the extended hold starts over with PLI then repair, never a rewatch
     sup.handle(progress(g, 19.9), 19.9);
     let acts = tick(&mut sup, 20.0);
+    assert!(has_keyframe(&acts, KeyframeMethod::Repair));
+    assert!(!has_keyframe(&acts, KeyframeMethod::Rewatch));
+    sup.handle(progress(g, 22.9), 22.9);
+    let acts = tick(&mut sup, 23.0);
     assert!(has_keyframe(&acts, KeyframeMethod::Pli));
     assert!(!has_keyframe(&acts, KeyframeMethod::Rewatch));
 }

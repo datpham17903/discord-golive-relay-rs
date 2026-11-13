@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use relay_core::clock::{monotonic, wall_clock};
@@ -26,7 +26,7 @@ use relay_media::FrameSource;
 use relay_media::codec::VoiceCodec;
 use relay_voice::connection::RtcSettings;
 use relay_voice::publish::VideoParams;
-use relay_voice::receive::{MediaType, Packet, RtpObservation};
+use relay_voice::receive::{MediaType, Packet, ReceiveHealth, RtpObservation};
 use relay_voice::voice_ws::{StreamSpec, video_codec_list};
 use relay_voice::{ClientEvent, JoinOptions, StreamClient, VoiceClient, VoiceClientConfig};
 use serde_json::{Value, json};
@@ -54,6 +54,10 @@ const LEAVE_TIMEOUT: Duration = Duration::from_secs(5);
 const GATEWAY_CLOSE_WAIT: Duration = Duration::from_secs(5);
 /// `request_video(ssrc, quality=100)` for the target's first video SSRC.
 const REQUEST_QUALITY: u32 = 100;
+/// A repair acts on a receive path that has been silent or undecryptable at least this long.
+const REPAIR_STALE: Duration = Duration::from_secs(3);
+const RECONNECT_MIN_INTERVAL: Duration = Duration::from_secs(15);
+const DAVE_RECOVERY_MIN_INTERVAL: Duration = Duration::from_secs(10);
 
 /// What the adapter needs from the config (`cfg.discord`, `control`, `codecs`, `runtime`,
 /// `logging`) plus the knobs the tests turn.
@@ -128,6 +132,47 @@ struct State {
     codec_hook: Option<(String, u64)>,
     last_vsu_session: Option<String>,
     pump: Option<JoinHandle<()>>,
+    /// Rate limits of `repair_receive`.
+    last_reconnect: Option<Instant>,
+    last_dave_recovery: Option<Instant>,
+}
+
+/// What `repair_receive` does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Repair {
+    ReconnectRtc,
+    RecoverDave,
+    Pli,
+}
+
+impl Repair {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ReconnectRtc => "reconnect_rtc",
+            Self::RecoverDave => "recover_dave",
+            Self::Pli => "pli",
+        }
+    }
+}
+
+/// No RTP at all: the RTC/UDP path is dead. Packets of the target that never decrypt (or a DAVE
+/// session that cannot decrypt it): the DAVE session is stuck. Otherwise, or while the matching
+/// repair is rate limited, the stream is probably fine and only a keyframe is missing.
+fn decide_repair(h: &ReceiveHealth, reconnect_ok: bool, dave_ok: bool) -> Repair {
+    if h.rtp_age >= REPAIR_STALE {
+        return if reconnect_ok {
+            Repair::ReconnectRtc
+        } else {
+            Repair::Pli
+        };
+    }
+    let undecryptable =
+        h.dave_stuck || (h.packet_age < REPAIR_STALE && h.decrypted_age >= REPAIR_STALE);
+    if undecryptable && dave_ok {
+        Repair::RecoverDave
+    } else {
+        Repair::Pli
+    }
 }
 
 /// The receive path's state, touched on the UDP dispatcher thread for every packet.
@@ -1024,6 +1069,59 @@ impl Inner {
         self.watch(generation, epoch, stream).await
     }
 
+    async fn repair_receive(&self) -> Result<String, AdapterError> {
+        let sc = self
+            .st
+            .lock()
+            .sc
+            .clone()
+            .ok_or_else(|| AdapterError::failed("no watch to repair"))?;
+        let receiver = match sc.receiver() {
+            Ok(receiver) => receiver,
+            Err(_) if sc.is_reconnecting() => return Ok("reconnecting".into()),
+            Err(e) => return Err(e.into()),
+        };
+        let health = receiver.health(self.target_id());
+        let now = Instant::now();
+        let action = {
+            let st = self.st.lock();
+            let due = |last: Option<Instant>, every: Duration| {
+                last.is_none_or(|at| now.saturating_duration_since(at) >= every)
+            };
+            decide_repair(
+                &health,
+                due(st.last_reconnect, RECONNECT_MIN_INTERVAL),
+                due(st.last_dave_recovery, DAVE_RECOVERY_MIN_INTERVAL),
+            )
+        };
+        let ms = |d: Duration| d.as_millis() as u64;
+        self.log(
+            "receive_repair",
+            json!({
+                "action": action.as_str(),
+                "rtp_age_ms": ms(health.rtp_age),
+                "packet_age_ms": ms(health.packet_age),
+                "decrypted_age_ms": ms(health.decrypted_age),
+                "undecryptable_age_ms": ms(health.undecryptable_age),
+                "dave_stuck": health.dave_stuck,
+            }),
+        );
+        match action {
+            Repair::ReconnectRtc => {
+                self.st.lock().last_reconnect = Some(now);
+                sc.reconnect().await;
+                // the new connection starts without our video request: ask again at the next packet
+                self.hot.lock().video_ssrc = None;
+            }
+            Repair::RecoverDave => {
+                self.st.lock().last_dave_recovery = Some(now);
+                sc.recover_dave()?;
+            }
+            Repair::Pli => self.request_pli().await?,
+        }
+        Ok(action.as_str().into())
+    }
+
     async fn request_pli(&self) -> Result<(), AdapterError> {
         let ssrc = self.hot.lock().video_ssrc;
         let sc = self.st.lock().sc.clone();
@@ -1470,6 +1568,10 @@ impl Adapter for DiscordAdapter {
 
     fn request_pli(&self) -> ApiFuture<'_, ()> {
         Box::pin(async move { self.inner.request_pli().await })
+    }
+
+    fn repair_receive(&self) -> ApiFuture<'_, String> {
+        Box::pin(async move { self.inner.repair_receive().await })
     }
 
     fn rewatch(&self) -> ApiFuture<'_, ()> {

@@ -284,6 +284,20 @@ fn invalid_commit_reports_op31_and_sends_a_fresh_key_package() {
 }
 
 #[test]
+fn recover_reports_the_last_transition_and_sends_a_fresh_key_package() {
+    let (a, _b) = establish(2);
+    match a.recover().unwrap().as_slice() {
+        [DaveOut::InvalidCommitWelcome(2), DaveOut::KeyPackage(kp)] => assert!(!kp.is_empty()),
+        other => panic!("unexpected {other:?}"),
+    }
+    a.on_prepare_transition(7, 1).unwrap();
+    match a.recover().unwrap().as_slice() {
+        [DaveOut::InvalidCommitWelcome(7), DaveOut::KeyPackage(kp)] => assert!(!kp.is_empty()),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
 fn prepare_epoch_one_reinitializes_and_other_epochs_are_ignored() {
     let (a, _b) = establish(5);
     assert!(a.on_prepare_epoch(2, 1).unwrap().is_empty());

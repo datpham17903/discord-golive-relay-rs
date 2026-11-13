@@ -532,6 +532,23 @@ impl VoiceWs {
         self.send(Outgoing::Binary(frame))
     }
 
+    /// Sends the messages of a DAVE event (ops 23, 26, 28, 31).
+    pub fn send_dave(&self, outs: &[DaveOut]) -> Result<(), VoiceWsError> {
+        for out in outs {
+            match out {
+                DaveOut::TransitionReady(id) => {
+                    self.send_json(op::DAVE_TRANSITION_READY, json!({"transition_id": id}))?
+                }
+                DaveOut::InvalidCommitWelcome(id) => {
+                    self.send_json(op::MLS_INVALID_COMMIT_WELCOME, json!({"transition_id": id}))?
+                }
+                DaveOut::KeyPackage(data) => self.send_binary(op::MLS_KEY_PACKAGE, data)?,
+                DaveOut::CommitWelcome(data) => self.send_binary(op::MLS_COMMIT_WELCOME, data)?,
+            }
+        }
+        Ok(())
+    }
+
     /// op 1 SELECT_PROTOCOL.
     pub fn select_protocol(
         &self,

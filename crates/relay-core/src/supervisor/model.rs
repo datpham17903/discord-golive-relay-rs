@@ -141,10 +141,12 @@ str_enum!(Liveness {
     Unknown = "unknown",
 });
 
-/// `RequestInputKeyframe.method` (Python `"pli" | "rewatch"`).
+/// `RequestInputKeyframe.method` (Python `"pli" | "rewatch"`, plus `"repair"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyframeMethod {
     Pli,
+    /// Repairs the receive path in place (DAVE or RTC connection) without leaving the stream.
+    Repair,
     Rewatch,
 }
 
@@ -152,6 +154,7 @@ impl KeyframeMethod {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pli => "pli",
+            Self::Repair => "repair",
             Self::Rewatch => "rewatch",
         }
     }

@@ -144,6 +144,10 @@ pub trait Adapter: Send + Sync {
     /// Narrows or widens the codecs the target may send; `false` (no-op) when not watching.
     fn update_watch_codecs<'a>(&'a self, names: &'a [&'a str]) -> ApiFuture<'a, bool>;
     fn request_pli(&self) -> ApiFuture<'_, ()>;
+    /// Repairs the watch's receive path in place, without leaving the stream (the RTC connection
+    /// when no media arrives, the DAVE session when it does not decrypt, else a PLI); returns the
+    /// action taken.
+    fn repair_receive(&self) -> ApiFuture<'_, String>;
     /// Drops and re-establishes the watch of the same stream (forces a keyframe).
     fn rewatch(&self) -> ApiFuture<'_, ()>;
     fn stop_watch(&self) -> ApiFuture<'_, ()>;

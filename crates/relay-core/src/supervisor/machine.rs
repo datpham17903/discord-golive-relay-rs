@@ -46,7 +46,11 @@ const PREJOIN_IGNORED: [&str; 10] = [
     "stream_available",
     "not_paused",
 ];
-const KEYFRAME_ORDER: [KeyframeMethod; 2] = [KeyframeMethod::Pli, KeyframeMethod::Rewatch];
+const KEYFRAME_ORDER: [KeyframeMethod; 3] = [
+    KeyframeMethod::Pli,
+    KeyframeMethod::Repair,
+    KeyframeMethod::Rewatch,
+];
 /// Consecutive fast watch retries before the parent voice client is rebuilt.
 const FAST_WATCH_LEAVE_AFTER: u32 = 3;
 
@@ -117,7 +121,7 @@ impl SupervisorConfig {
             rejection_limit: 3,
             paused_capability_verified: false,
             // No rewatch by default: dropping the watch of a full stream gives its slot away.
-            keyframe_methods: vec![KeyframeMethod::Pli],
+            keyframe_methods: vec![KeyframeMethod::Pli, KeyframeMethod::Repair],
             keyframe_step_seconds: 3.0,
             prejoin_voice: false,
             watch_retry_interval: 1.0,
@@ -1296,7 +1300,7 @@ impl Supervisor {
         self.recover(now, acts);
     }
 
-    /// Input keyframe recovery: pli, then rewatch, then wait for a natural frame.
+    /// Input keyframe recovery: pli, then repair, then rewatch, then wait for a natural frame.
     fn recover(&mut self, now: f64, acts: &mut Vec<Action>) {
         if self.hold_reason == Some(HoldReason::Paused)
             || self.gateway != GatewayState::Fresh

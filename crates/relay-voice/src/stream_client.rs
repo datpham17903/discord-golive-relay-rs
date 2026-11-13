@@ -617,6 +617,25 @@ impl StreamClient {
         self.conn()
     }
 
+    /// Reconnects the RTC connection to the stream server in place: same stream (no STREAM_WATCH),
+    /// DAVE state, listener and session kept. Returns once the new connection is installed or the
+    /// stream was torn down (a [`ClientEvent::Disconnected`]).
+    pub async fn reconnect(&self) {
+        Arc::clone(&self.inner).migrate(1).await;
+    }
+
+    /// Repairs the DAVE session of the live connection and sends the resulting ops (31, 26).
+    /// Returns the number of messages sent.
+    pub fn recover_dave(&self) -> Result<usize, VoiceError> {
+        let conn = self.conn()?;
+        let outs = conn
+            .dave()
+            .recover()
+            .map_err(|e| VoiceError::Invalid(e.to_string()))?;
+        conn.ws().send_dave(&outs)?;
+        Ok(outs.len())
+    }
+
     /// Stops watching (or ends our own stream): the sender stops, STREAM_DELETE (op 19) goes out,
     /// the connection is closed and the client unregistered.
     pub async fn disconnect(&self) {

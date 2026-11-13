@@ -1334,3 +1334,59 @@ fn adapter_options_follow_the_codec_policy_of_the_config() {
         .collect();
     assert_eq!(names, ["opus", "H264"]);
 }
+
+fn health(rtp: u64, packet: u64, decrypted: u64, stuck: bool) -> ReceiveHealth {
+    ReceiveHealth {
+        rtp_age: Duration::from_secs(rtp),
+        packet_age: Duration::from_secs(packet),
+        decrypted_age: Duration::from_secs(decrypted),
+        undecryptable_age: Duration::from_secs(0),
+        dave_stuck: stuck,
+    }
+}
+
+#[test]
+fn repair_reconnects_the_rtc_connection_when_no_rtp_arrives() {
+    assert_eq!(
+        decide_repair(&health(3, 3, 3, false), true, true),
+        Repair::ReconnectRtc
+    );
+    // no RTP wins over a stuck DAVE session
+    assert_eq!(
+        decide_repair(&health(5, 5, 5, true), true, true),
+        Repair::ReconnectRtc
+    );
+    assert_eq!(
+        decide_repair(&health(5, 5, 5, false), false, true),
+        Repair::Pli
+    );
+}
+
+#[test]
+fn repair_recovers_dave_when_packets_arrive_but_never_decrypt() {
+    assert_eq!(
+        decide_repair(&health(0, 0, 4, false), true, true),
+        Repair::RecoverDave
+    );
+    assert_eq!(
+        decide_repair(&health(0, 5, 5, true), true, true),
+        Repair::RecoverDave
+    );
+    assert_eq!(
+        decide_repair(&health(0, 0, 4, false), true, false),
+        Repair::Pli
+    );
+}
+
+#[test]
+fn repair_sends_a_pli_when_the_receive_path_looks_healthy() {
+    assert_eq!(
+        decide_repair(&health(0, 0, 1, false), true, true),
+        Repair::Pli
+    );
+    // the target went quiet but the connection and DAVE are fine
+    assert_eq!(
+        decide_repair(&health(0, 4, 4, false), true, true),
+        Repair::Pli
+    );
+}

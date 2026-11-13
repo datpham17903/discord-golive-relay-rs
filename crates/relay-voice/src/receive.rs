@@ -458,6 +458,35 @@ struct PendingDaveFrame {
     counted: bool,
 }
 
+/// Receive health of one sender, as `Instant`s (the receiver's creation until the first event).
+#[derive(Clone, Copy)]
+struct UserHealth {
+    packet: Instant,
+    decrypted: Instant,
+    undecryptable: Instant,
+}
+
+struct Health {
+    rtp: Instant,
+    users: HashMap<u64, UserHealth>,
+}
+
+/// What [`Receiver::health`] reports about one sender. Ages count from the receiver's creation
+/// while the event has not happened yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReceiveHealth {
+    /// Any RTP packet that passed the transport decrypt.
+    pub rtp_age: Duration,
+    /// Any media packet mapped to the sender, before the DAVE decrypt.
+    pub packet_age: Duration,
+    /// The last media unit of the sender that decrypted.
+    pub decrypted_age: Duration,
+    /// The last media unit of the sender that was stashed or failed the DAVE decrypt.
+    pub undecryptable_age: Duration,
+    /// A DAVE session exists that cannot decrypt the sender yet.
+    pub dave_stuck: bool,
+}
+
 #[derive(Default)]
 struct RxState {
     depacketizers: HashMap<(u32, u8), Box<dyn VideoDepacketizer + Send>>,
@@ -494,6 +523,7 @@ pub struct Receiver {
     ssrcs: Arc<SsrcMap>,
     anchor: Instant,
     state: Mutex<RxState>,
+    health: Mutex<Health>,
     feedback: Mutex<Option<FeedbackHandler>>,
 }
 
@@ -527,6 +557,7 @@ impl Receiver {
         if !cfg.rtx_enabled {
             rtx_types.clear();
         }
+        let anchor = Instant::now();
         Self {
             cfg,
             payload_types,
@@ -536,10 +567,54 @@ impl Receiver {
             sink,
             dave,
             ssrcs,
-            anchor: Instant::now(),
+            anchor,
             state: Mutex::new(RxState::default()),
+            health: Mutex::new(Health {
+                rtp: anchor,
+                users: HashMap::new(),
+            }),
             feedback: Mutex::new(None),
         }
+    }
+
+    /// Always-on receive health of `user_id` (not gated by `debug_stats`).
+    pub fn health(&self, user_id: u64) -> ReceiveHealth {
+        let now = Instant::now();
+        let h = self.health.lock();
+        let u = h.users.get(&user_id).copied().unwrap_or(UserHealth {
+            packet: self.anchor,
+            decrypted: self.anchor,
+            undecryptable: self.anchor,
+        });
+        let age = |at: Instant| now.saturating_duration_since(at);
+        ReceiveHealth {
+            rtp_age: age(h.rtp),
+            packet_age: age(u.packet),
+            decrypted_age: age(u.decrypted),
+            undecryptable_age: age(u.undecryptable),
+            dave_stuck: self.dave.has_session() && !self.dave.can_decrypt(user_id),
+        }
+    }
+
+    fn note(&self, user: Option<u64>, update: impl FnOnce(&mut UserHealth, Instant)) {
+        let Some(user) = user else { return };
+        let now = Instant::now();
+        let anchor = self.anchor;
+        let mut h = self.health.lock();
+        let u = h.users.entry(user).or_insert(UserHealth {
+            packet: anchor,
+            decrypted: anchor,
+            undecryptable: anchor,
+        });
+        update(u, now);
+    }
+
+    fn note_decrypted(&self, user: Option<u64>) {
+        self.note(user, |u, now| u.decrypted = now);
+    }
+
+    fn note_undecryptable(&self, user: Option<u64>) {
+        self.note(user, |u, now| u.undecryptable = now);
     }
 
     /// Routes the NACK / PLI / FIR packets of viewers to `handler` (`None` ignores them).
@@ -573,6 +648,9 @@ impl Receiver {
         };
         if failed > 0 {
             self.stat(&mut st, "rtp_decrypt_failures", failed as u64);
+        }
+        if !decrypted.is_empty() {
+            self.health.lock().rtp = Instant::now();
         }
         for packet in decrypted {
             let header = &packet.packet;
@@ -653,6 +731,7 @@ impl Receiver {
             codec
         };
         let user_id = self.ssrcs.user_for(ssrc);
+        self.note(user_id, |u, now| u.packet = now);
         let rtp_packet = RtpPacketInfo {
             sequence: d.sequence,
             timestamp: d.timestamp,
@@ -710,14 +789,21 @@ impl Receiver {
                 None => {}
                 Some(user) if self.dave.can_decrypt(user) => {
                     match self.dave.decrypt(user, DaveMedia::Audio, &payload) {
-                        Ok(plain) => payload = plain,
+                        Ok(plain) => {
+                            payload = plain;
+                            self.note_decrypted(user_id);
+                        }
                         Err(_) => {
                             self.stat(st, "audio_decrypt_failures", 1);
+                            self.note_undecryptable(user_id);
                             return None;
                         }
                     }
                 }
-                Some(_) if looks_like_dave => return None,
+                Some(_) if looks_like_dave => {
+                    self.note_undecryptable(user_id);
+                    return None;
+                }
                 Some(_) => {}
             }
         }
@@ -811,26 +897,32 @@ impl Receiver {
 
         let looks_like_dave = looks_like_dave_protocol_frame(&frame);
         if looks_like_dave && !self.can_attempt_dave(p.user_id) {
+            self.note_undecryptable(p.user_id);
             self.stash_dave_frame(st, &p, frame, rtp_packets, false);
             return None;
         }
         match self.decrypt_video(p.user_id, frame.clone(), true) {
-            Ok(payload) => Some(self.video_packet(
-                st,
-                &p.decoded,
-                p.codec,
-                p.ssrc,
-                p.user_id,
-                payload,
-                rtp_packets,
-                p.received_at,
-            )),
+            Ok(payload) => {
+                self.note_decrypted(p.user_id);
+                Some(self.video_packet(
+                    st,
+                    &p.decoded,
+                    p.codec,
+                    p.ssrc,
+                    p.user_id,
+                    payload,
+                    rtp_packets,
+                    p.received_at,
+                ))
+            }
             Err(e) if looks_like_dave && e.is_retryable() => {
+                self.note_undecryptable(p.user_id);
                 self.stash_dave_frame(st, &p, frame, rtp_packets, true);
                 None
             }
             Err(_) => {
                 self.stat(st, "video_frame_decrypt_failures", 1);
+                self.note_undecryptable(p.user_id);
                 None
             }
         }
@@ -949,16 +1041,19 @@ impl Receiver {
                 continue;
             }
             match self.decrypt_video(frame.user_id, frame.payload.clone(), !frame.counted) {
-                Ok(payload) => ready.push(self.video_packet(
-                    st,
-                    &frame.decoded,
-                    frame.codec,
-                    frame.ssrc,
-                    frame.user_id,
-                    payload,
-                    frame.rtp_packets,
-                    frame.received_at,
-                )),
+                Ok(payload) => {
+                    self.note_decrypted(frame.user_id);
+                    ready.push(self.video_packet(
+                        st,
+                        &frame.decoded,
+                        frame.codec,
+                        frame.ssrc,
+                        frame.user_id,
+                        payload,
+                        frame.rtp_packets,
+                        frame.received_at,
+                    ));
+                }
                 Err(e) if e.is_retryable() => {
                     frame.counted = true;
                     remaining.push_back(frame);

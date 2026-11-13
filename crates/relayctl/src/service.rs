@@ -1834,10 +1834,10 @@ impl Service {
                 }
                 Action::RequestInputKeyframe { method, .. } => match method {
                     KeyframeMethod::Pli => self.pli(c),
-                    KeyframeMethod::Rewatch => {
+                    KeyframeMethod::Repair | KeyframeMethod::Rewatch => {
                         let s = self.arc();
                         self.queue("_keyframe", async move {
-                            s.keyframe(KeyframeMethod::Rewatch).await;
+                            s.keyframe(method).await;
                             Ok(())
                         });
                     }
@@ -2947,6 +2947,10 @@ impl Service {
         };
         let (step, result) = match method {
             KeyframeMethod::Pli => ("request_pli", adapter.request_pli().await),
+            // the adapter logs the action it took
+            KeyframeMethod::Repair => {
+                ("repair_receive", adapter.repair_receive().await.map(|_| ()))
+            }
             KeyframeMethod::Rewatch => ("rewatch", adapter.rewatch().await),
         };
         if let Err(e) = result {

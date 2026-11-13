@@ -415,6 +415,13 @@ impl Adapter for FakeAdapter {
         })
     }
 
+    fn repair_receive(&self) -> ApiFuture<'_, String> {
+        Box::pin(async move {
+            self.push("repair");
+            Ok("pli".into())
+        })
+    }
+
     fn rewatch(&self) -> ApiFuture<'_, ()> {
         Box::pin(async move {
             self.push("rewatch");

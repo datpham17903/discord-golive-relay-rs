@@ -113,6 +113,8 @@ struct Inner {
     /// `dave_pending_transitions`: transition id to protocol version.
     pending: HashMap<u16, u16>,
     downgraded: bool,
+    /// The last transition id seen in op 21, 29 or 30 (0 before any).
+    last_transition: u16,
 }
 
 /// Read-only view of the session, for probes and status output.
@@ -145,6 +147,7 @@ impl Dave {
                 protocol_version: 0,
                 pending: HashMap::new(),
                 downgraded: false,
+                last_transition: 0,
             }),
             decrypt_failures: AtomicU64::new(0),
         }
@@ -212,6 +215,18 @@ impl Dave {
         inner.reinit_session()
     }
 
+    /// Repairs a session that never becomes able to decrypt: op 31 for the last transition seen,
+    /// then a re-initialized session with a new key package (op 26), which makes the voice server
+    /// remove and re-add this member. Nothing without a session.
+    pub fn recover(&self) -> Result<Vec<DaveOut>, DaveError> {
+        let mut inner = self.inner.lock();
+        if inner.session.is_none() {
+            return Ok(Vec::new());
+        }
+        let transition_id = inner.last_transition;
+        inner.recover_from_invalid_commit(transition_id)
+    }
+
     /// op 21 DAVE_PREPARE_TRANSITION. Ignored without a session, like every DAVE op.
     pub fn on_prepare_transition(
         &self,
@@ -219,10 +234,12 @@ impl Dave {
         protocol_version: u16,
     ) -> Result<Vec<DaveOut>, DaveError> {
         let mut inner = self.inner.lock();
-        let Some(session) = inner.session.as_mut() else {
+        if inner.session.is_none() {
             return Ok(Vec::new());
-        };
-        session
+        }
+        inner.last_transition = transition_id;
+        inner
+            .session_mut()
             .prepare_transition(transition_id, protocol_version)
             .map_err(session_err)?;
         inner.pending.insert(transition_id, protocol_version);
@@ -310,6 +327,7 @@ impl Dave {
                 };
                 let transition_id = u16::from_be_bytes([*hi, *lo]);
                 let welcome = opcode == op::MLS_WELCOME;
+                inner.last_transition = transition_id;
                 match inner.process_commit_or_welcome(welcome, transition_id, data) {
                     Ok(out) => Ok(out),
                     Err(_) => inner.recover_from_invalid_commit(transition_id),

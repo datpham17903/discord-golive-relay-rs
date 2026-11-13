@@ -690,6 +690,10 @@ struct Core {
     last_4006_restart: Option<f64>,
     exit_code: i32,
     shutdown_requested: bool,
+    /// SIGUSR2 arrived: restart once idle.
+    restart_pending: bool,
+    /// The idle restart fired and no stop signal cancelled it since.
+    restart_now: bool,
     persist_failed: bool,
     last_pli: f64,
     pli_timer: Option<AbortHandle>,
@@ -851,6 +855,8 @@ impl Service {
             last_4006_restart: None,
             exit_code: 0,
             shutdown_requested: false,
+            restart_pending: false,
+            restart_now: false,
             persist_failed: false,
             last_pli: f64::NEG_INFINITY,
             pli_timer: None,
@@ -1089,6 +1095,43 @@ impl Service {
         self.request_shutdown_locked(&mut c);
     }
 
+    /// SIGUSR2: restart once no session is live. A second request while pending is a no-op.
+    pub fn request_restart(&self) {
+        let mut c = self.core.lock();
+        if c.restart_pending || c.shutdown_requested {
+            return;
+        }
+        c.restart_pending = true;
+        self.log("restart_requested", json!({}));
+    }
+
+    /// A stop signal replaces a pending or fired restart with a plain exit.
+    pub fn cancel_restart(&self) {
+        let mut c = self.core.lock();
+        c.restart_pending = false;
+        c.restart_now = false;
+    }
+
+    /// Whether the shutdown in progress is the idle restart.
+    pub fn restart_wanted(&self) -> bool {
+        self.core.lock().restart_now
+    }
+
+    fn check_restart_locked(&self, c: &mut Core) {
+        if !c.restart_pending || c.shutdown_requested {
+            return;
+        }
+        let state = self.sup.lock().state();
+        if matches!(
+            state,
+            RelayState::Idle | RelayState::Disabled | RelayState::Fatal
+        ) {
+            c.restart_now = true;
+            self.log("restart_now", json!({}));
+            self.request_shutdown_locked(c);
+        }
+    }
+
     fn request_shutdown_locked(&self, c: &mut Core) {
         if c.shutdown_requested {
             return;
@@ -1154,6 +1197,7 @@ impl Service {
                     self.write_status(&mut c);
                     next_status = now + STATUS_S;
                 }
+                self.check_restart_locked(&mut c);
             }
             tokio::time::sleep(Duration::from_secs_f64(self.tick_s)).await;
         }
@@ -3609,6 +3653,7 @@ impl Service {
         let snap = self.sup.lock().status(wall_clock());
         let mut d = snapshot_json(&snap);
         d.insert("adapter_running".into(), json!(c.adapter.is_some()));
+        d.insert("restart_pending".into(), json!(c.restart_pending));
         d.insert("metrics".into(), c.metrics.snapshot());
         let w = self.publisher.take_window();
         d.insert(
@@ -4363,20 +4408,30 @@ async fn wait_signals(svc: Weak<Service>) {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
-            let (Ok(mut term), Ok(mut hup)) = (
+            let (Ok(mut term), Ok(mut hup), Ok(mut usr2)) = (
                 signal(SignalKind::terminate()),
                 signal(SignalKind::hangup()),
+                signal(SignalKind::user_defined2()),
             ) else {
                 let _ = tokio::signal::ctrl_c().await;
                 if let Some(s) = svc.upgrade() {
+                    s.cancel_restart();
                     s.request_shutdown();
                 }
                 continue;
             };
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = term.recv() => {}
-                _ = hup.recv() => {}
+            let restart = tokio::select! {
+                _ = tokio::signal::ctrl_c() => false,
+                _ = term.recv() => false,
+                _ = hup.recv() => false,
+                _ = usr2.recv() => true,
+            };
+            if restart {
+                match svc.upgrade() {
+                    Some(s) => s.request_restart(),
+                    None => return,
+                }
+                continue;
             }
         }
         #[cfg(windows)]
@@ -4400,7 +4455,10 @@ async fn wait_signals(svc: Weak<Service>) {
             }
         }
         match svc.upgrade() {
-            Some(s) => s.request_shutdown(),
+            Some(s) => {
+                s.cancel_restart();
+                s.request_shutdown();
+            }
             None => return,
         }
     }
@@ -4523,12 +4581,19 @@ pub async fn run_service(
             }
         }
     }
-    let code = svc.run(token).await;
+    let code = Arc::clone(&svc).run(token).await;
     if let Some(task) = metrics_task {
         task.abort();
     }
+    if code == 0 && svc.restart_wanted() {
+        RESTART_ON_EXIT.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     code
 }
+
+/// Set by [`run_service`] when it stopped for a SIGUSR2 restart; `relayctl run` then re-execs.
+pub static RESTART_ON_EXIT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 fn stderr_logger(secrets: &[String]) -> JsonLogger {
     let writer: Arc<std::sync::Mutex<dyn std::io::Write + Send>> =

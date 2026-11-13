@@ -708,7 +708,20 @@ fn run_relay(args: &RunArgs, ctx: &mut Ctx<'_>) -> i32 {
             return EXIT_FAIL;
         }
     };
-    rt.block_on((ctx.run_service)(cfg, Token::new(token), metrics_listen))
+    let code = rt.block_on((ctx.run_service)(cfg, Token::new(token), metrics_listen));
+    // Drop the runtime first so sockets and locks are released before the new image takes them.
+    drop(rt);
+    #[cfg(unix)]
+    if code == 0 && crate::service::RESTART_ON_EXIT.load(std::sync::atomic::Ordering::SeqCst) {
+        use std::os::unix::process::CommandExt;
+        let mut args = std::env::args_os();
+        if let Some(argv0) = args.next() {
+            let err = std::process::Command::new(argv0).args(args).exec();
+            ctx.warn(&format!("restart failed: {err}"));
+            return EXIT_FAIL;
+        }
+    }
+    code
 }
 
 #[cfg(all(test, any(unix, windows)))]

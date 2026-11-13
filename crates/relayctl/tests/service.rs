@@ -3511,3 +3511,46 @@ service_test!(test_status_stream_full_key_null_by_default, async {
     let env = env(Setup::default());
     assert!(env.svc.status_dict()["stream_full_s"].is_null());
 });
+
+service_test!(test_restart_waits_for_idle, async {
+    let env = env(Setup::default());
+    let task = env.reach_relaying().await;
+    env.svc.request_restart();
+    env.svc.request_restart();
+    assert_eq!(env.svc.status_dict()["restart_pending"], json!(true));
+    assert_eq!(env.log_count("restart_requested"), 1);
+    sleep(0.5).await;
+    assert!(!task.is_finished());
+    assert_eq!(env.log_count("restart_now"), 0);
+    assert!(!env.svc.restart_wanted());
+    env.emit(Event::StreamEnded {
+        key: "key-1".into(),
+        incarnation: 1,
+    })
+    .await;
+    let code = tokio::time::timeout(Duration::from_secs(40), task)
+        .await
+        .expect("service stopped in time")
+        .expect("run task");
+    assert_eq!(code, 0);
+    assert_eq!(env.log_count("restart_now"), 1);
+    assert!(env.svc.restart_wanted());
+});
+
+service_test!(test_stop_signal_cancels_restart, async {
+    let env = env(Setup::default());
+    let task = env.reach_relaying().await;
+    env.svc.request_restart();
+    env.svc.cancel_restart();
+    assert_eq!(env.svc.status_dict()["restart_pending"], json!(false));
+    env.emit(Event::StreamEnded {
+        key: "key-1".into(),
+        incarnation: 1,
+    })
+    .await;
+    wait_until(|| env.state() == RelayState::Idle).await;
+    sleep(0.5).await;
+    assert_eq!(env.log_count("restart_now"), 0);
+    env.shutdown(task).await;
+    assert!(!env.svc.restart_wanted());
+});

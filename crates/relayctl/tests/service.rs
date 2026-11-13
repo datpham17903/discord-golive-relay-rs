@@ -1821,6 +1821,49 @@ service_test!(test_non_operator_may_use_public_commands_only, async {
 });
 
 service_test!(
+    test_unmirror_is_limited_to_the_creator_or_an_operator,
+    async {
+        let (uid, mirror_chan, creator, other) = (424242, 999, 51, 52);
+        let env = env(multi(uid, AccountRole::Mirror));
+        let task = env.reach_relaying().await;
+        let a = env.adapter(0);
+        a.set_voice_ids(&[env.chan, mirror_chan]);
+        env.chat("!relay mirror", 1, Some(mirror_chan), creator)
+            .await;
+        wait_until(|| a.replies().len() == 1).await;
+        assert_eq!(
+            env.load().mirror_owners,
+            std::collections::BTreeMap::from([(mirror_chan, creator)])
+        );
+        for (mid, text) in [(2, "!relay unmirror"), (3, "!relay unmirror all")] {
+            env.chat(text, mid, Some(mirror_chan), other).await;
+        }
+        env.chat(&format!("!relay unmirror {mirror_chan}"), 4, None, other)
+            .await;
+        wait_until(|| a.replies().len() == 4).await;
+        assert!(
+            a.texts()[1..]
+                .iter()
+                .all(|t| t.starts_with("⚠️ **Chỉ người đã tạo mirror**"))
+        );
+        assert_eq!(env.svc.with_sup(|s| s.routing().mirrors.len()), 1);
+        env.chat("!relay unmirror all", 5, None, creator).await;
+        wait_until(|| a.replies().len() == 5).await;
+        assert!(a.texts()[4].starts_with('✅'));
+        assert!(env.load().mirror_owners.is_empty());
+        // operator removes someone else's mirror
+        env.chat("!relay mirror", 6, Some(mirror_chan), creator)
+            .await;
+        env.op(&format!("!relay unmirror {mirror_chan}"), 7).await;
+        wait_until(|| a.replies().len() == 7).await;
+        assert!(a.texts()[6].starts_with('✅'));
+        assert!(env.svc.with_sup(|s| s.routing().mirrors.is_empty()));
+        assert!(env.load().mirror_owners.is_empty());
+        assert_eq!(env.shutdown(task).await, 0);
+    }
+);
+
+service_test!(
     test_per_author_cooldown_one_notice_then_silence_operators_exempt,
     async {
         let env = env(Setup::default());

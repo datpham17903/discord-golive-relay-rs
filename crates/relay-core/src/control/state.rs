@@ -7,7 +7,7 @@
 //! (`account_view`) belongs to Task C4, which owns those types; `PersistedState::account_record` is the
 //! raw half.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -133,6 +133,9 @@ pub struct PersistedState {
     pub relay_autoscale: Option<bool>,
     /// User ids added by `op add`; config owners are not included.
     pub chat_operator_ids: Vec<u64>,
+    /// Mirror channel id -> user id of the chat author who created it; mirrors without an entry
+    /// are operator-only to remove.
+    pub mirror_owners: BTreeMap<u64, u64>,
 }
 
 impl Default for PersistedState {
@@ -149,6 +152,7 @@ impl Default for PersistedState {
             prejoin_voice: None,
             relay_autoscale: None,
             chat_operator_ids: Vec::new(),
+            mirror_owners: BTreeMap::new(),
         }
     }
 }
@@ -203,6 +207,17 @@ impl PersistedState {
                     .collect(),
             ),
         );
+        if !self.mirror_owners.is_empty() {
+            m.insert(
+                "mirror_owners".into(),
+                Value::Object(
+                    self.mirror_owners
+                        .iter()
+                        .map(|(c, u)| (c.to_string(), Value::from(*u)))
+                        .collect(),
+                ),
+            );
+        }
         Value::Object(m)
     }
 }
@@ -364,6 +379,7 @@ fn parse_inner(raw: &[u8]) -> Result<PersistedState, String> {
     let mut prejoin_voice = None;
     let mut relay_autoscale = None;
     let mut chat_operator_ids = Vec::new();
+    let mut mirror_owners = BTreeMap::new();
     if version == 3 {
         let rt = key(data, "routing")?;
         if !rt.is_null() {
@@ -381,6 +397,13 @@ fn parse_inner(raw: &[u8]) -> Result<PersistedState, String> {
                 return Err(bad());
             }
         }
+        if let Some(owners) = data.get("mirror_owners") {
+            let bad = || "bad mirror_owners".to_string();
+            for (k, v) in owners.as_object().ok_or_else(bad)? {
+                let channel = k.parse::<u64>().ok().filter(|c| *c > 0).ok_or_else(bad)?;
+                mirror_owners.insert(channel, positive_int(v).ok_or_else(bad)?);
+            }
+        }
     }
     Ok(PersistedState {
         schema_version: SCHEMA_VERSION,
@@ -394,6 +417,7 @@ fn parse_inner(raw: &[u8]) -> Result<PersistedState, String> {
         prejoin_voice,
         relay_autoscale,
         chat_operator_ids,
+        mirror_owners,
     })
 }
 

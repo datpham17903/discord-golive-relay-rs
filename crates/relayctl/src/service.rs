@@ -1597,7 +1597,29 @@ impl Service {
                 match plan_change(&resolved, &old, &ctx) {
                     Err(text) => Ok(("rejected", text)),
                     Ok(new) => {
-                        self.routing_write(c, &old, &new)?;
+                        if !operator && matches!(resolved, Command::RemoveMirror { .. }) {
+                            let owners = self.store.load()?.mirror_owners;
+                            let denied = old.mirrors.keys().find(|ch| {
+                                !new.mirrors.contains_key(*ch)
+                                    && owners.get(ch) != Some(&ev.author_id)
+                            });
+                            if let Some(ch) = denied {
+                                return Ok((
+                                    "rejected",
+                                    format!(
+                                        "⚠️ **Chỉ người đã tạo mirror** ở kênh <#{ch}> **hoặc operator** mới gỡ được."
+                                    ),
+                                ));
+                            }
+                        }
+                        let added = match resolved {
+                            Command::AddMirror {
+                                channel_id: Some(ch),
+                                ..
+                            } => Some((ch, ev.author_id)),
+                            _ => None,
+                        };
+                        self.routing_write(c, &old, &new, added)?;
                         self.handle(
                             c,
                             Event::RoutingChanged {
@@ -1642,7 +1664,13 @@ impl Service {
 
     /// Writes under the state lock (re-checked by revision): a routing stored since the last poll
     /// must not be overwritten.
-    fn routing_write(&self, c: &Core, old: &Routing, new: &Routing) -> Result<(), ChatFail> {
+    fn routing_write(
+        &self,
+        c: &Core,
+        old: &Routing,
+        new: &Routing,
+        new_owner: Option<(u64, u64)>,
+    ) -> Result<(), ChatFail> {
         let planned = old.to_persisted();
         let default = config_routing(&self.cfg).to_persisted();
         for _ in 0..8 {
@@ -1654,6 +1682,11 @@ impl Service {
             }
             match self.store.update_expecting(s.revision, |mut st| {
                 st.routing = Some(new.to_persisted());
+                st.mirror_owners
+                    .retain(|ch, _| new.mirrors.contains_key(ch));
+                if let Some((ch, user)) = new_owner {
+                    st.mirror_owners.insert(ch, user);
+                }
                 st
             }) {
                 Ok(_) => return Ok(()),

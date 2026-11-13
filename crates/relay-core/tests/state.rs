@@ -475,6 +475,37 @@ fn chat_operator_ids_are_optional_v3_key() {
     }
 }
 
+#[test]
+fn mirror_owners_are_optional_v3_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut doc = v3_doc();
+    write_json(tmp.path(), &doc);
+    let store = StateStore::new(tmp.path());
+    assert!(store.load().unwrap().mirror_owners.is_empty());
+    store
+        .update(|s| PersistedState {
+            mirror_owners: [(999, 51), (123456789012345678, 5)].into(),
+            ..s
+        })
+        .unwrap();
+    assert_eq!(
+        StateStore::new(tmp.path()).load().unwrap().mirror_owners,
+        [(999, 51), (123456789012345678, 5)].into()
+    );
+    let bad = [
+        json!([]),
+        json!({"x": 1}),
+        json!({"0": 1}),
+        json!({"5": 0}),
+        json!({"5": "1"}),
+    ];
+    for b in bad {
+        doc["mirror_owners"] = b.clone();
+        write_json(tmp.path(), &doc);
+        assert!(is_corrupt(store.load()), "{b}");
+    }
+}
+
 /// Fixture text produced by CPython `json.dumps(asdict(state), indent=2)` (revision 2).
 const PYTHON_STATE_JSON: &str = r#"{
   "schema_version": 3,

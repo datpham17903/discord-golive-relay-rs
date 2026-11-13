@@ -4,7 +4,7 @@ Description=Discord relay status dashboard
 After=network-online.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/relay-dashboard/dashboard.py --status /var/lib/discord-relay/status.json --log /opt/discord-relay-rs/relay.log --data /var/lib/relay-dashboard --listen 127.0.0.1:8787
+ExecStart=/opt/relay-dashboard/relayctl dashboard --status /var/lib/discord-relay/status.json --log /opt/discord-relay-rs/relay.log --data /var/lib/relay-dashboard --listen 127.0.0.1:8787
 Restart=always
 RestartSec=5
 DynamicUser=yes

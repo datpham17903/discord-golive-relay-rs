@@ -1,5 +1,5 @@
 mod dev;
-use relayctl::{calibrate, cli, tokens};
+use relayctl::{calibrate, cli, dashboard, tokens};
 
 use std::process::ExitCode;
 
@@ -19,6 +19,8 @@ enum Command {
     /// Derive `source_dead_timeout_seconds` from watch logs.
     #[command(name = "calibrate-tdead", hide = true)]
     CalibrateTdead(calibrate::CalibrateArgs),
+    /// Public read-only status page served from status.json and the run log.
+    Dashboard(dashboard::DashboardArgs),
     /// Developer tools (live probes); not part of the supported interface.
     #[command(subcommand, hide = true)]
     Dev(dev::DevCommand),
@@ -37,6 +39,9 @@ fn main() -> ExitCode {
             ))
             .unwrap_or(1),
         ),
+        Command::Dashboard(args) => {
+            ExitCode::from(u8::try_from(dashboard::run(&args)).unwrap_or(1))
+        }
         Command::Dev(command) => dev::run(command),
     }
 }

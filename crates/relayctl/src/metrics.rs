@@ -42,35 +42,10 @@ pub async fn serve(listener: TcpListener, endpoints: Arc<Endpoints>) {
 }
 
 async fn answer(mut stream: TcpStream, endpoints: &Endpoints) -> std::io::Result<()> {
-    // The whole head is read before answering: closing with unread input would reset the connection.
-    let mut head = Vec::new();
-    let mut buf = [0u8; 1024];
-    while !head.windows(4).any(|w| w == b"\r\n\r\n") && !head.windows(2).any(|w| w == b"\n\n") {
-        if head.len() > MAX_REQUEST_HEAD {
-            return reply(
-                &mut stream,
-                431,
-                "Request Header Fields Too Large",
-                PLAIN_TEXT,
-                "",
-            )
-            .await;
-        }
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        head.extend_from_slice(&buf[..n]);
-    }
-    let line = head.split(|&b| b == b'\n').next().unwrap_or_default();
-    let line = String::from_utf8_lossy(line);
-    let mut parts = line.split_whitespace();
-    let (Some(method), Some(target), Some(_version)) = (parts.next(), parts.next(), parts.next())
-    else {
-        return reply(&mut stream, 400, "Bad Request", PLAIN_TEXT, "bad request\n").await;
+    let Some((method, path)) = read_request(&mut stream).await? else {
+        return Ok(());
     };
-    let path = target.split('?').next().unwrap_or_default();
-    match (method, path) {
+    match (method.as_str(), path.as_str()) {
         ("GET", "/healthz") if (endpoints.healthy)() => {
             reply(&mut stream, 200, "OK", PLAIN_TEXT, "ok").await
         }
@@ -102,20 +77,70 @@ async fn answer(mut stream: TcpStream, endpoints: &Endpoints) -> std::io::Result
     }
 }
 
-async fn reply(
+/// Read one request head and return its method and path (query dropped). A malformed or oversized
+/// head is answered here (400/431) and gives `None`.
+pub(crate) async fn read_request(
+    stream: &mut TcpStream,
+) -> std::io::Result<Option<(String, String)>> {
+    // The whole head is read before answering: closing with unread input would reset the connection.
+    let mut head = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !head.windows(4).any(|w| w == b"\r\n\r\n") && !head.windows(2).any(|w| w == b"\n\n") {
+        if head.len() > MAX_REQUEST_HEAD {
+            reply(
+                stream,
+                431,
+                "Request Header Fields Too Large",
+                PLAIN_TEXT,
+                "",
+            )
+            .await?;
+            return Ok(None);
+        }
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        head.extend_from_slice(&buf[..n]);
+    }
+    let line = head.split(|&b| b == b'\n').next().unwrap_or_default();
+    let line = String::from_utf8_lossy(line);
+    let mut parts = line.split_whitespace();
+    let (Some(method), Some(target), Some(_version)) = (parts.next(), parts.next(), parts.next())
+    else {
+        reply(stream, 400, "Bad Request", PLAIN_TEXT, "bad request\n").await?;
+        return Ok(None);
+    };
+    let path = target.split('?').next().unwrap_or_default();
+    Ok(Some((method.to_string(), path.to_string())))
+}
+
+pub(crate) async fn reply(
     stream: &mut TcpStream,
     code: u16,
     reason: &str,
     content_type: &str,
     body: &str,
 ) -> std::io::Result<()> {
+    reply_with(stream, code, reason, content_type, "", body.as_bytes()).await
+}
+
+/// `extra_headers` is zero or more complete `Name: value\r\n` lines.
+pub(crate) async fn reply_with(
+    stream: &mut TcpStream,
+    code: u16,
+    reason: &str,
+    content_type: &str,
+    extra_headers: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
     let head = format!(
-        "HTTP/1.1 {code} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
-         Connection: close\r\n\r\n",
+        "HTTP/1.1 {code} {reason}\r\nContent-Type: {content_type}\r\n{extra_headers}\
+         Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).await?;
-    stream.write_all(body.as_bytes()).await?;
+    stream.write_all(body).await?;
     stream.shutdown().await
 }
 

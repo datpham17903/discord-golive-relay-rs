@@ -476,9 +476,11 @@ impl RtcConnection {
             return Err(VoiceError::AlreadyListening);
         }
         let receiver = Arc::clone(&self.receiver);
-        let rtp = self.udp.add_batch_listener(
-            move |batch| {
-                let packets = receiver.process_batch(batch, Instant::now());
+        let rtp = self.udp.add_timed_batch_listener(
+            move |batch, arrivals| {
+                // Socket arrival times, not dispatch time: queueing and DAVE work on a slow host
+                // would otherwise read as path delay in the TWCC feedback and hold the sender back.
+                let packets = receiver.process_batch_timed(batch, arrivals, Instant::now());
                 if packets.is_empty() {
                     return;
                 }

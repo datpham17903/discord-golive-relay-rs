@@ -621,6 +621,33 @@ fn test_rtp_tap_sees_every_packet_with_its_twcc_extension() {
 }
 
 #[test]
+fn test_timed_batch_reports_each_packets_socket_arrival() {
+    // TWCC feedback is built from these times: they must be when each datagram was read, not when
+    // the batch was processed, or dispatch delay reads as path delay and the sender is throttled.
+    let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let seen2 = seen.clone();
+    let rig = rig(move |cfg| {
+        cfg.rtp_tap = Some(Arc::new(move |o| {
+            seen2.lock().push((o.sequence, o.received_at))
+        }));
+    });
+    let t0 = Instant::now();
+    let arrivals = [
+        t0,
+        t0 + Duration::from_millis(3),
+        t0 + Duration::from_millis(7),
+    ];
+    let wire = [
+        rtp(105, 10, 0, MEDIA_SSRC, true, Some(500), &idr(0)),
+        vec![0u8; 4], // unparsable: dropped, but must not shift the times of the packets after it
+        rtp(105, 11, 0, MEDIA_SSRC, true, Some(501), &idr(1)),
+    ];
+    rig.rx
+        .process_batch_timed(&wire, &arrivals, t0 + Duration::from_millis(40));
+    assert_eq!(*seen.lock(), [(10, arrivals[0]), (11, arrivals[2])]);
+}
+
+#[test]
 fn test_forget_other_payload_types_drops_the_old_codec_state() {
     let rig = rig(|_| {});
     // H264 (105) packets 1 and 3 arrive: 2 is missing, the buffer holds 3

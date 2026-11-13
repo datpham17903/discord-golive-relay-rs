@@ -56,11 +56,15 @@ impl ListenerKinds {
 
 type PacketCallback = Arc<dyn Fn(&[u8]) + Send + Sync>;
 type BatchCallback = Arc<dyn Fn(&[Vec<u8>]) + Send + Sync>;
+/// A batch with the arrival time of each datagram, taken when the reader thread got it from the
+/// socket (before any queueing or processing).
+type TimedBatchCallback = Arc<dyn Fn(&[Vec<u8>], &[Instant]) + Send + Sync>;
 
 #[derive(Clone)]
 enum ListenerCallback {
     Single(PacketCallback),
     Batch(BatchCallback),
+    TimedBatch(TimedBatchCallback),
 }
 
 fn update_atomic_max(value: &AtomicUsize, candidate: usize) {
@@ -174,7 +178,9 @@ struct UdpTransportInner {
 
 struct UdpDispatchBatch {
     rtp_packets: Vec<Vec<u8>>,
+    rtp_arrivals: Vec<Instant>,
     rtcp_packets: Vec<Vec<u8>>,
+    rtcp_arrivals: Vec<Instant>,
 }
 
 impl UdpTransportInner {
@@ -383,7 +389,7 @@ fn run_udp_reader(inner: Arc<UdpTransportInner>) {
     while inner.reader_running.load(Ordering::SeqCst) {
         packets.clear();
         match inner.socket.recv(&mut buffer) {
-            Ok(length) => packets.push(buffer[..length].to_vec()),
+            Ok(length) => packets.push((buffer[..length].to_vec(), Instant::now())),
             Err(err) if is_transient(&err) => {
                 thread::sleep(UDP_IDLE_SLEEP);
                 continue;
@@ -401,7 +407,7 @@ fn run_udp_reader(inner: Arc<UdpTransportInner>) {
 
         while packets.len() < UDP_RECV_BATCH_SIZE {
             match inner.socket.recv(&mut buffer) {
-                Ok(length) => packets.push(buffer[..length].to_vec()),
+                Ok(length) => packets.push((buffer[..length].to_vec(), Instant::now())),
                 Err(err) if is_transient(&err) => break,
                 Err(_) => {
                     if !inner.closed.load(Ordering::SeqCst) {
@@ -420,14 +426,16 @@ fn run_udp_reader(inner: Arc<UdpTransportInner>) {
     }
 }
 
-fn handle_udp_packets(inner: &Arc<UdpTransportInner>, packets: Vec<Vec<u8>>) {
+fn handle_udp_packets(inner: &Arc<UdpTransportInner>, packets: Vec<(Vec<u8>, Instant)>) {
     if inner.closed.load(Ordering::SeqCst) || !inner.reader_running.load(Ordering::SeqCst) {
         return;
     }
 
     let mut rtp_packets: Vec<Vec<u8>> = Vec::new();
+    let mut rtp_arrivals: Vec<Instant> = Vec::new();
     let mut rtcp_packets: Vec<Vec<u8>> = Vec::new();
-    for packet in packets {
+    let mut rtcp_arrivals: Vec<Instant> = Vec::new();
+    for (packet, arrived) in packets {
         inner.stats.packets_received.fetch_add(1, Ordering::Relaxed);
 
         if let Some(ping) = inner.ping.lock().expect("UDP ping poisoned").as_ref()
@@ -455,6 +463,7 @@ fn handle_udp_packets(inner: &Arc<UdpTransportInner>, packets: Vec<Vec<u8>>) {
                     .rtp_packets_received
                     .fetch_add(1, Ordering::Relaxed);
                 rtp_packets.push(packet);
+                rtp_arrivals.push(arrived);
             }
             Some(UdpPacketKind::Rtcp) => {
                 inner
@@ -462,6 +471,7 @@ fn handle_udp_packets(inner: &Arc<UdpTransportInner>, packets: Vec<Vec<u8>>) {
                     .rtcp_packets_received
                     .fetch_add(1, Ordering::Relaxed);
                 rtcp_packets.push(packet);
+                rtcp_arrivals.push(arrived);
             }
             None => {
                 inner
@@ -476,7 +486,9 @@ fn handle_udp_packets(inner: &Arc<UdpTransportInner>, packets: Vec<Vec<u8>>) {
         inner,
         UdpDispatchBatch {
             rtp_packets,
+            rtp_arrivals,
             rtcp_packets,
+            rtcp_arrivals,
         },
     );
 }
@@ -541,8 +553,18 @@ fn run_udp_dispatcher(inner: Arc<UdpTransportInner>, receiver: Receiver<UdpDispa
         }
 
         let packet_count = batch.rtp_packets.len() + batch.rtcp_packets.len();
-        dispatch_udp_packets(&inner, UDP_LISTENER_RTP, batch.rtp_packets);
-        dispatch_udp_packets(&inner, UDP_LISTENER_RTCP, batch.rtcp_packets);
+        dispatch_udp_packets(
+            &inner,
+            UDP_LISTENER_RTP,
+            batch.rtp_packets,
+            &batch.rtp_arrivals,
+        );
+        dispatch_udp_packets(
+            &inner,
+            UDP_LISTENER_RTCP,
+            batch.rtcp_packets,
+            &batch.rtcp_arrivals,
+        );
         inner
             .stats
             .dispatch_batches_dispatched
@@ -554,7 +576,12 @@ fn run_udp_dispatcher(inner: Arc<UdpTransportInner>, receiver: Receiver<UdpDispa
     }
 }
 
-fn dispatch_udp_packets(inner: &Arc<UdpTransportInner>, listener_flag: u8, packets: Vec<Vec<u8>>) {
+fn dispatch_udp_packets(
+    inner: &Arc<UdpTransportInner>,
+    listener_flag: u8,
+    packets: Vec<Vec<u8>>,
+    arrivals: &[Instant],
+) {
     if packets.is_empty() {
         return;
     }
@@ -572,6 +599,9 @@ fn dispatch_udp_packets(inner: &Arc<UdpTransportInner>, listener_flag: u8, packe
         match callback {
             ListenerCallback::Batch(callback) => {
                 call_listener(inner, || callback(&packets));
+            }
+            ListenerCallback::TimedBatch(callback) => {
+                call_listener(inner, || callback(&packets, arrivals));
             }
             ListenerCallback::Single(callback) => {
                 for packet in packets.iter() {
@@ -672,6 +702,20 @@ impl UdpTransport {
         self.inner.start_reader();
         self.inner
             .add_listener(ListenerCallback::Batch(Arc::new(callback)), kinds.flags())
+    }
+
+    /// Like [`Self::add_batch_listener`], with each datagram's socket arrival time (the reader
+    /// thread's clock when it read it), so callers can time packets independent of dispatch delay.
+    pub fn add_timed_batch_listener(
+        &self,
+        callback: impl Fn(&[Vec<u8>], &[Instant]) + Send + Sync + 'static,
+        kinds: ListenerKinds,
+    ) -> u64 {
+        self.inner.start_reader();
+        self.inner.add_listener(
+            ListenerCallback::TimedBatch(Arc::new(callback)),
+            kinds.flags(),
+        )
     }
 
     pub fn remove_listener(&self, id: u64) {

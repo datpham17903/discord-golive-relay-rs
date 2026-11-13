@@ -668,8 +668,29 @@ impl Receiver {
     /// Decrypts, reorders and depacketizes a batch of RTP datagrams. Frames held back for DAVE keys
     /// that have arrived since are released first, like Python.
     pub fn process_batch(&self, batch: &[Vec<u8>], received_at: Instant) -> Vec<Packet> {
+        self.process(batch, None, received_at)
+    }
+
+    /// [`Self::process_batch`] with each datagram's socket arrival time (`arrivals[i]` for
+    /// `batch[i]`), used as the packet's `received_at` (TWCC feedback and jitter timing) instead of
+    /// the time the batch is processed; `now` is the processing time.
+    pub fn process_batch_timed(
+        &self,
+        batch: &[Vec<u8>],
+        arrivals: &[Instant],
+        now: Instant,
+    ) -> Vec<Packet> {
+        self.process(batch, Some(arrivals), now)
+    }
+
+    fn process(
+        &self,
+        batch: &[Vec<u8>],
+        arrivals: Option<&[Instant]>,
+        now: Instant,
+    ) -> Vec<Packet> {
         let mut st = self.state.lock();
-        let mut out = self.retry_pending_dave(&mut st, received_at);
+        let mut out = self.retry_pending_dave(&mut st, now);
         let (failed, decrypted) = match self.crypto_rx.decrypt_rtp_packets(batch) {
             Ok(result) => result,
             Err(_) => {
@@ -684,6 +705,9 @@ impl Receiver {
             self.health.lock().rtp = Instant::now();
         }
         for packet in decrypted {
+            let received_at = arrivals
+                .and_then(|a| a.get(packet.index).copied())
+                .unwrap_or(now);
             let header = &packet.packet;
             let decoded = Decoded {
                 payload_type: header.payload_type,

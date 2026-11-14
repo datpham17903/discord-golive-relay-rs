@@ -10,7 +10,7 @@ RELAY_BIN=${RELAY_BIN:-/opt/discord-relay-rs/relayctl}
 DASH_BIN=${DASH_BIN:-/opt/relay-dashboard/relayctl}
 DASH_UNIT=relay-dashboard
 
-version_of() { "$1" --version 2>/dev/null | awk '{print $2}'; }
+version_of() { "$1" --version 2>/dev/null | awk '$1 == "relayctl" {print $2; exit}'; }
 # true when $1 is a strictly newer version than $2 (an empty $2 counts as older)
 newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]; }
 
@@ -47,6 +47,11 @@ esac
 
 case " $need " in *" $RELAY_BIN "*)
     for pid in $(pgrep -f 'relayctl run' || true); do
+        # a shell whose command line merely mentions "relayctl run" also matches
+        case $(readlink "/proc/$pid/exe" 2>/dev/null) in
+            */relayctl | */relayctl\ \(deleted\)) ;;
+            *) continue ;;
+        esac
         # the binary the process runs (its file may have been replaced): only a relay that
         # handles SIGUSR2 (>= 0.1.6) may get it; for older ones SIGUSR2 is fatal
         running=$(version_of "/proc/$pid/exe" || true)

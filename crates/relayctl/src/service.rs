@@ -3134,6 +3134,7 @@ impl Service {
         // actions queued now are void once the session changes
         let g = c.session_gen;
         let before = c.codec_ctl.effective().map(str::to_owned);
+        let pinned_before = c.codec_ctl.pinned_until().is_some();
         let actions = match c.codec_ctl.handle(event, now) {
             Ok(actions) => actions,
             Err(e) => {
@@ -3144,6 +3145,14 @@ impl Service {
         let after = c.codec_ctl.effective().map(str::to_owned);
         if before != after {
             self.log("codec_change", json!({"old": before, "new": after}));
+        }
+        match (pinned_before, c.codec_ctl.pinned_until()) {
+            (false, Some(until)) => self.log(
+                "codec_pinned",
+                json!({"watch": "H264", "for_s": (until - now).round()}),
+            ),
+            (true, None) => self.log("codec_unpinned", json!({})),
+            _ => {}
         }
         for a in actions {
             let s = self.arc();

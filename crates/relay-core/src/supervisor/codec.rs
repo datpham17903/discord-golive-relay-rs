@@ -10,6 +10,8 @@
 //! `CodecAction` is the union of `UpdateWatch`, `UpdateOutput` and `SwapOutput`. Offers are the
 //! `relay_media::codec::down_from` slices.
 
+use std::collections::VecDeque;
+
 use indexmap::IndexMap;
 use relay_media::codec::{CODEC_ORDER, UnknownCodec, down_from, lowest, rank};
 
@@ -89,6 +91,14 @@ pub struct CodecController {
     pub upgrade_wait_s: f64,
     pub hold_force_s: f64,
     pub swap_retry_s: f64,
+    /// This many source codec changes within `flap_window_s` pin the watch to H.264 for `pin_s`:
+    /// the target's stream flips codec whenever a viewer who cannot decode the better one comes
+    /// or goes, and every flip re-negotiates every output.
+    pub flap_count: usize,
+    pub flap_window_s: f64,
+    pub pin_s: f64,
+    source_changes: VecDeque<f64>,
+    pinned_until: f64,
     source: Option<String>,
     eligible: bool,
     held_since: Option<f64>,
@@ -115,6 +125,11 @@ impl CodecController {
             upgrade_wait_s: 3.0,
             hold_force_s: 2.0,
             swap_retry_s: 5.0,
+            flap_count: 3,
+            flap_window_s: 120.0,
+            pin_s: 900.0,
+            source_changes: VecDeque::new(),
+            pinned_until: NEVER,
             source: None,
             eligible: true,
             held_since: None,
@@ -152,6 +167,11 @@ impl CodecController {
         self.outs.get(&output_id).map(|o| o.reported.as_str())
     }
 
+    /// When the H.264 watch pin set by a flapping source ends.
+    pub fn pinned_until(&self) -> Option<f64> {
+        (self.pinned_until != NEVER).then_some(self.pinned_until)
+    }
+
     /// `(effective, watch)` while the pipeline is being moved between two codecs.
     pub fn switching(&self) -> Option<(&str, &str)> {
         self.switching
@@ -167,6 +187,20 @@ impl CodecController {
     ) -> Result<Vec<CodecAction>, UnknownCodec> {
         match event {
             CodecEvent::SourceCodec { codec, eligible } => {
+                if self.source.as_ref().is_some_and(|s| *s != codec) && now >= self.pinned_until {
+                    self.source_changes.push_back(now);
+                    while self
+                        .source_changes
+                        .front()
+                        .is_some_and(|&t| now - t > self.flap_window_s)
+                    {
+                        self.source_changes.pop_front();
+                    }
+                    if self.source_changes.len() >= self.flap_count {
+                        self.source_changes.clear();
+                        self.pinned_until = now + self.pin_s;
+                    }
+                }
                 self.source = Some(codec);
                 self.eligible = eligible;
             }
@@ -248,6 +282,9 @@ impl CodecController {
 
     fn reconcile(&mut self, now: f64) -> Result<Vec<CodecAction>, UnknownCodec> {
         let mut actions = Vec::new();
+        if now >= self.pinned_until {
+            self.pinned_until = NEVER;
+        }
         if self.forced {
             if self.live_since.is_some_and(|t| now - t >= LIVE_STABLE_S) {
                 self.forced = false;
@@ -275,7 +312,11 @@ impl CodecController {
             }
         }
         let any_natural = !natural.is_empty();
-        let w: String = lowest(&natural)?.unwrap_or("AV1").to_string();
+        let w: String = if self.pinned_until != NEVER {
+            "H264".to_string()
+        } else {
+            lowest(&natural)?.unwrap_or("AV1").to_string()
+        };
         let watch = down_from(&w)?;
         if Some(watch) != self.last_watch {
             if rank(&w)? < rank(&self.w)? {

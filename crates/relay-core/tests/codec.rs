@@ -328,3 +328,51 @@ fn test_failed_swap_retried_after_cooldown() {
     assert!(!h(&mut c, CodecEvent::Tick, 1.0).iter().any(is_swap));
     assert!(h(&mut c, CodecEvent::Tick, 5.2).contains(&swap(A, "H265")));
 }
+
+/// Three source codec changes inside the flap window pin the watch to H.264 for the pin time;
+/// the effective codec keeps following the source.
+#[test]
+fn test_flapping_source_pins_watch_to_h264() {
+    let mut c = CodecController::new();
+    h(&mut c, source("H265", true), 0.0);
+    h(&mut c, added(A, "AV1", "AV1"), 0.0);
+    h(&mut c, source("H264", true), 10.0);
+    let acts = h(&mut c, source("H265", true), 20.0);
+    assert!(!acts.contains(&update_watch("H264")));
+    assert_eq!(c.pinned_until(), None);
+
+    let acts = h(&mut c, source("H264", true), 30.0);
+    assert!(acts.contains(&update_watch("H264")), "{acts:?}");
+    assert_eq!(c.pinned_until(), Some(30.0 + c.pin_s));
+    assert_eq!(c.effective(), Some("H264"));
+
+    // a stray H.265 while pinned is still passed through, the watch stays H.264
+    let acts = h(&mut c, source("H265", true), 40.0);
+    assert_eq!(c.effective(), Some("H265"));
+    assert!(
+        !acts
+            .iter()
+            .any(|a| matches!(a, CodecAction::UpdateWatch { .. }))
+    );
+
+    // the pin expires on a tick and the full watch list is offered again
+    let end = 30.0 + c.pin_s;
+    let acts = h(&mut c, CodecEvent::Tick, end);
+    assert_eq!(c.pinned_until(), None);
+    assert!(acts.contains(&update_watch("AV1")), "{acts:?}");
+}
+
+#[test]
+fn test_slow_codec_changes_do_not_pin() {
+    let mut c = CodecController::new();
+    h(&mut c, source("H265", true), 0.0);
+    for (i, codec) in ["H264", "H265", "H264", "H265"].iter().enumerate() {
+        h(&mut c, source(codec, true), 100.0 * (i as f64 + 1.0));
+    }
+    assert_eq!(c.pinned_until(), None);
+    // eligibility or size changes of the same codec are not codec changes
+    for t in [500.0, 501.0, 502.0] {
+        h(&mut c, source("H265", t != 501.0), t);
+    }
+    assert_eq!(c.pinned_until(), None);
+}

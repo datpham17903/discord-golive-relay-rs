@@ -106,11 +106,11 @@ fn id_str(v: &Value) -> Option<String> {
     }
 }
 
-/// target / channel / outputs / mirror_list / free_mirrors from a status.json. Names come from the
-/// optional top-level `names` and are null when unknown; user ids are never emitted.
-fn topology(s: &Value) -> Map<String, Value> {
+/// target / channel / outputs / mirror_list / free_mirrors from a status.json. Names come from
+/// `names` ({users, channels} keyed by id) and are null when unknown.
+fn topology(s: &Value, names: &Value) -> Map<String, Value> {
     let name = |kind: &str, id: Option<String>| -> Value {
-        id.and_then(|id| s["names"][kind][id.as_str()].as_str().map(Value::from))
+        id.and_then(|id| names[kind][id.as_str()].as_str().map(Value::from))
             .unwrap_or(Value::Null)
     };
     let routing = &s["routing"];
@@ -133,7 +133,8 @@ fn topology(s: &Value) -> Map<String, Value> {
             free += 1;
         }
         outputs.push(json!({
-            "name": name("users", id),
+            "name": name("users", id.clone()),
+            "user_id": id,
             "role": role,
             "state": state,
             "channel": name("channels", channel_id.clone()),
@@ -150,6 +151,7 @@ fn topology(s: &Value) -> Map<String, Value> {
                         "channel": name("channels", Some(ch.clone())),
                         "channel_id": ch,
                         "account": name("users", id_str(acc)),
+                        "account_id": id_str(acc),
                     })
                 })
                 .collect()
@@ -158,7 +160,10 @@ fn topology(s: &Value) -> Map<String, Value> {
     let mut out = Map::new();
     out.insert(
         "target".into(),
-        json!({"name": name("users", id_str(&routing["target_user_id"]))}),
+        json!({
+            "name": name("users", id_str(&routing["target_user_id"])),
+            "id": id_str(&routing["target_user_id"]),
+        }),
     );
     out.insert(
         "channel".into(),
@@ -183,6 +188,8 @@ struct State {
     state: Option<String>,
     /// Newest event of any kind: when a killed run was last alive.
     last_ts: Option<f64>,
+    /// Every name status.json has reported, so a name stays known while its user is away.
+    names: Value,
 }
 
 pub struct Collector {
@@ -219,6 +226,11 @@ impl Collector {
             open_incident: h["open_incident"].as_object().cloned(),
             state: h["state"].as_str().map(str::to_string),
             last_ts: h["last_ts"].as_f64(),
+            names: if h["names"].is_object() {
+                h["names"].clone()
+            } else {
+                json!({"users": {}, "channels": {}})
+            },
         };
         Ok(Self {
             status_path: status_path.to_path_buf(),
@@ -237,6 +249,7 @@ impl Collector {
             "open_incident": st.open_incident,
             "state": st.state,
             "last_ts": st.last_ts,
+            "names": st.names,
         });
         let mut tmp = self.history_path.clone().into_os_string();
         tmp.push(".tmp");
@@ -347,7 +360,12 @@ impl Collector {
                 ] {
                     snap.insert(k.into(), v);
                 }
-                snap.extend(topology(&s));
+                for kind in ["users", "channels"] {
+                    for (id, n) in s["names"][kind].as_object().into_iter().flatten() {
+                        st.names[kind][id] = n.clone();
+                    }
+                }
+                snap.extend(topology(&s, &st.names));
                 sample =
                     json!({"t": now, "state": s["state"], "pps": pps, "fps": fps, "loss": loss});
             }
@@ -813,36 +831,57 @@ mod tests {
 
     #[test]
     fn topology_with_names() {
-        let t = topology(&topo_status(true));
-        assert_eq!(t["target"], json!({"name": "Tai"}));
+        let s = topo_status(true);
+        let t = topology(&s, &s["names"]);
+        assert_eq!(t["target"], json!({"name": "Tai", "id": "11"}));
         assert_eq!(t["channel"], json!({"name": "Main"}));
         assert_eq!(t["free_mirrors"], 2);
         assert_eq!(
             t["mirror_list"],
-            json!([{"channel": "Side", "channel_id": "501", "account": "Mir<b>"}])
+            json!([{"channel": "Side", "channel_id": "501", "account": "Mir<b>",
+                    "account_id": "22"}])
         );
         let o = t["outputs"].as_array().unwrap();
         assert_eq!(o.len(), 5);
         assert_eq!(
             o[0],
-            json!({"name": "Relay1", "role": "relay", "state": "live", "channel": "Main",
-                   "channel_id": "500", "viewers": 4, "uptime_s": 90.5})
+            json!({"name": "Relay1", "user_id": "21", "role": "relay", "state": "live",
+                   "channel": "Main", "channel_id": "500", "viewers": 4, "uptime_s": 90.5})
         );
         assert_eq!(o[2]["name"], Value::Null);
+        assert_eq!(o[2]["user_id"], "23");
         assert_eq!(o[2]["channel_id"], Value::Null);
-        // no account id leaks
-        let text = Value::Object(t).to_string();
-        assert!(!text.contains("\"account\":22") && !text.contains("\"11\""));
     }
 
     #[test]
     fn topology_without_names_falls_back_to_null() {
-        let t = topology(&topo_status(false));
-        assert_eq!(t["target"], json!({"name": null}));
+        let s = topo_status(false);
+        let t = topology(&s, &s["names"]);
+        assert_eq!(t["target"], json!({"name": null, "id": "11"}));
         assert_eq!(t["channel"], json!({"name": null}));
         assert_eq!(t["outputs"][1]["channel"], Value::Null);
         assert_eq!(t["outputs"][1]["channel_id"], "501");
         assert_eq!(t["mirror_list"][0]["account"], Value::Null);
         assert_eq!(t["free_mirrors"], 2);
+    }
+
+    #[test]
+    fn names_stay_known_after_status_drops_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = collector(dir.path());
+        c.poll_status(100.0, Some((topo_status(true), 0.0)));
+        c.poll_status(102.0, Some((topo_status(false), 0.0)));
+        let snap = c.st.lock().snapshot.clone();
+        assert_eq!(snap["target"]["name"], "Tai");
+        assert_eq!(snap["outputs"][0]["name"], "Relay1");
+        std::fs::write(
+            dir.path().join("relay.log"),
+            "
+",
+        )
+        .unwrap();
+        c.tail_log(104.0).unwrap();
+        let again = collector(dir.path());
+        assert_eq!(again.st.lock().names["users"]["11"], "Tai");
     }
 }

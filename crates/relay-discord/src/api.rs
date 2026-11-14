@@ -183,6 +183,10 @@ pub trait Adapter: Send + Sync {
 /// safe after a partial `publish`.
 pub trait OutputAdapter: Send + Sync {
     fn user_id(&self) -> u64;
+    /// This account's own name in the guild, once READY has been seen.
+    fn display_name(&self) -> Option<String> {
+        None
+    }
     /// Logs in and waits for READY. A rejected token is reported as `OutAuthRejected` (nothing is
     /// left running); a token of another account is `AdapterError::AccountMismatch`.
     fn start(&self, token: Token) -> ApiFuture<'_, ()>;

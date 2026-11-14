@@ -393,3 +393,13 @@ fn directory_lookups_for_operator_list() {
     assert!(cache.is_bot(20));
     assert_eq!(cache.display_name(1, 20).as_deref(), Some("T"));
 }
+
+#[test]
+fn ready_user_name_is_known() {
+    let mut c = Cache::new();
+    c.apply(
+        "READY",
+        &json!({"user": {"id": "99", "username": "me", "global_name": "Me"}, "guilds": []}),
+    );
+    assert_eq!(c.display_name(10, 99).as_deref(), Some("Me"));
+}

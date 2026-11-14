@@ -396,6 +396,9 @@ impl Cache {
             .get("user")
             .and_then(|u| u.get("id"))
             .and_then(snowflake);
+        if let Some(user) = data.get("user") {
+            self.note_user(user);
+        }
         self.installation_id = data
             .get("apex_experiments")
             .and_then(|a| a.get("installation"))

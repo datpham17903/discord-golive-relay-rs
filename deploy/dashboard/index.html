@@ -214,17 +214,19 @@ function render(s) {
 
 function drawTopology(s) {
   const nm = o => o && o.name != null ? esc(o.name) : "—";
-  $("who").innerHTML = s.online ? `Target: <b>${nm(s.target)}</b> · Kênh chính: <b>${nm(s.channel)}</b>` : "—";
+  const user = (name, id) => (name != null ? esc(name) : "—") +
+    (id != null ? ` <small class="muted">${esc(id)}</small>` : "");
+  $("who").innerHTML = s.online ? `Target: <b>${user(s.target && s.target.name, s.target && s.target.id)}</b> · Kênh chính: <b>${nm(s.channel)}</b>` : "—";
   const OUT = { live: "Đang phát", off: "Nghỉ" };
   const outs = s.online ? s.outputs || [] : [];
-  $("outputs").innerHTML = outs.length ? outs.map(o => `<tr><td>${o.name != null ? esc(o.name) : "—"}</td>` +
+  $("outputs").innerHTML = outs.length ? outs.map(o => `<tr><td>${user(o.name, o.user_id)}</td>` +
     `<td>${o.role === "mirror" ? "mirror" : "relay"}</td><td>${esc(OUT[o.state] || o.state || "—")}</td>` +
     `<td>${o.channel != null ? esc(o.channel) : o.channel_id != null ? esc(o.channel_id) : "—"}</td>` +
     `<td>${o.viewers == null ? "—" : num(o.viewers)}</td></tr>`).join("")
     : `<tr><td colspan="5" class="muted">Chưa có dữ liệu</td></tr>`;
   const ml = s.online ? s.mirror_list || [] : [];
   $("mirror-list").innerHTML = "Mirror đang chạy: " + (ml.length ? ml.map(m =>
-    `${m.channel != null ? esc(m.channel) : "—"} <small class="muted">${esc(m.channel_id)}</small>`).join(", ") : "chưa có");
+    `${m.channel != null ? esc(m.channel) : "—"} <small class="muted">${esc(m.channel_id)}</small> (${user(m.account, m.account_id)})`).join(", ") : "chưa có");
   $("mirror-free").textContent = "Mirror trống: " + (s.online && s.free_mirrors != null ? s.free_mirrors : "—") + " tài khoản";
 }
 

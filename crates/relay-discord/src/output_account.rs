@@ -703,6 +703,13 @@ impl OutputAdapter for OutputAccountAdapter {
         self.inner.opts.user_id
     }
 
+    fn display_name(&self) -> Option<String> {
+        self.inner
+            .cache
+            .read()
+            .display_name(self.inner.opts.guild_id, self.inner.opts.user_id)
+    }
+
     fn start(&self, token: Token) -> ApiFuture<'_, ()> {
         Box::pin(async move { self.inner.start(token).await })
     }

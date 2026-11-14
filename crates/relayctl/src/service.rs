@@ -3732,12 +3732,17 @@ impl Service {
             channels.extend(m["channel_id"].as_u64());
         }
         let mut names = json!({"users": {}, "channels": {}});
-        if let Some(a) = c.adapter.as_ref() {
-            for id in users {
-                if let Some(n) = a.display_name(id) {
-                    names["users"][id.to_string()] = json!(n);
-                }
+        for id in users {
+            let n = c
+                .adapter
+                .as_ref()
+                .and_then(|a| a.display_name(id))
+                .or_else(|| c.out_adapters.get(&id).and_then(|o| o.display_name()));
+            if let Some(n) = n {
+                names["users"][id.to_string()] = json!(n);
             }
+        }
+        if let Some(a) = c.adapter.as_ref() {
             for id in channels {
                 if let Some(n) = a.channel_name(id) {
                     names["channels"][id.to_string()] = json!(n);

@@ -47,9 +47,9 @@ esac
 
 case " $need " in *" $RELAY_BIN "*)
     for pid in $(pgrep -f 'relayctl run' || true); do
-        # a shell whose command line merely mentions "relayctl run" also matches
+        # only the installed relay: a shell mentioning "relayctl run" or a copy elsewhere also match
         case $(readlink "/proc/$pid/exe" 2>/dev/null) in
-            */relayctl | */relayctl\ \(deleted\)) ;;
+            "$RELAY_BIN" | "$RELAY_BIN (deleted)") ;;
             *) continue ;;
         esac
         # the binary the process runs (its file may have been replaced): only a relay that

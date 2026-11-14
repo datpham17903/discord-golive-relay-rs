@@ -55,6 +55,12 @@ pub enum ClientEvent {
         stream_key: Option<String>,
         error: String,
     },
+    /// A stream we publish switched its DAVE key to a new group; a keyframe was requested through
+    /// its PLI handler so viewers who just joined can decode.
+    DaveTransition {
+        stream_key: String,
+        transition_id: u16,
+    },
     /// The media connection is gone for good (websocket closed and not recovered, or we were
     /// disconnected from voice).
     Disconnected {
@@ -751,7 +757,7 @@ impl VcInner {
                     stream_key: None,
                     error,
                 }),
-                ConnEvent::Message { .. } => {}
+                ConnEvent::Message { .. } | ConnEvent::DaveTransition(_) => {}
                 ConnEvent::Resumed => self.emit(ClientEvent::Reconnected { stream_key: None }),
                 ConnEvent::Closed { code, reason } => {
                     match after_close(code, self.cfg.rtc.reconnect) {

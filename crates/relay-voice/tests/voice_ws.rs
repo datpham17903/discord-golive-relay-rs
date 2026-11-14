@@ -850,6 +850,15 @@ async fn dave_text_ops_prepare_epoch_and_downgrade() {
         assert!(Instant::now() < deadline, "downgrade never executed");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    // the executed transition is reported so a publisher can ask for a fresh keyframe
+    assert!(matches!(
+        events_until(&mut h.events, |e| matches!(
+            e,
+            VoiceEvent::DaveTransition(_)
+        ))
+        .await,
+        VoiceEvent::DaveTransition(4)
+    ));
 }
 
 #[tokio::test]

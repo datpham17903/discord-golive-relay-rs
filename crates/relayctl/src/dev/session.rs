@@ -292,6 +292,16 @@ impl Probe {
                 self.log("reconnected", json!({"stream_key": stream_key}));
                 None
             }
+            ClientEvent::DaveTransition {
+                stream_key,
+                transition_id,
+            } => {
+                self.log(
+                    "dave_transition",
+                    json!({"stream_key": stream_key, "transition_id": transition_id}),
+                );
+                None
+            }
             ClientEvent::StreamTokenRefreshed { stream_key } => {
                 self.log("stream_token_refreshed", json!({"stream_key": stream_key}));
                 None

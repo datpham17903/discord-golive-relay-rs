@@ -142,6 +142,8 @@ pub enum ConnEvent {
         data: Value,
     },
     DaveError(String),
+    /// The DAVE key switched to a new group (see [`VoiceEvent::DaveTransition`]).
+    DaveTransition(u16),
     /// The websocket dropped and was resumed (op 9 RESUMED); the connection carries on.
     Resumed,
     /// The websocket ended; the connection is dead. `code` is the close code when there was one.
@@ -327,6 +329,7 @@ impl RtcConnection {
                 }
                 VoiceEvent::SessionUpdate(info) => early.push(ConnEvent::SessionUpdate(info)),
                 VoiceEvent::DaveError(error) => early.push(ConnEvent::DaveError(error)),
+                VoiceEvent::DaveTransition(id) => early.push(ConnEvent::DaveTransition(id)),
                 VoiceEvent::Closed { code, reason } => {
                     return Err(VoiceError::Closed { code, reason });
                 }
@@ -591,6 +594,7 @@ async fn pump(
                 ConnEvent::SessionUpdate(info)
             }
             VoiceEvent::DaveError(error) => ConnEvent::DaveError(error),
+            VoiceEvent::DaveTransition(id) => ConnEvent::DaveTransition(id),
             VoiceEvent::Resumed => ConnEvent::Resumed,
             VoiceEvent::Closed { code, reason } => {
                 shared.closed.store(true, Ordering::Relaxed);

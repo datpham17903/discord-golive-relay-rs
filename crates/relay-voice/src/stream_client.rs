@@ -286,6 +286,18 @@ impl StreamInner {
                     error,
                 }),
                 ConnEvent::Message { .. } => {}
+                ConnEvent::DaveTransition(transition_id) => {
+                    // A keyframe sent before the switch is undecryptable for a viewer who just
+                    // joined: without a fresh one it stays black until the source's next keyframe.
+                    let pli = self.state.lock().pli.clone();
+                    if let Some(pli) = pli {
+                        vc.emit(ClientEvent::DaveTransition {
+                            stream_key: self.key.clone(),
+                            transition_id,
+                        });
+                        pli();
+                    }
+                }
                 ConnEvent::Resumed => vc.emit(ClientEvent::Reconnected {
                     stream_key: stream_key.clone(),
                 }),

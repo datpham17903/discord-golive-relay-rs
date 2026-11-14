@@ -439,6 +439,9 @@ pub enum VoiceEvent {
         data: Value,
     },
     DaveError(String),
+    /// op 22 switched the DAVE key to a new group (transition id > 0): receivers that just joined
+    /// can only decrypt media sent from now on.
+    DaveTransition(u16),
     /// The socket ended; the task is gone. `code` is the close code when there was one.
     Closed {
         code: Option<u16>,
@@ -1207,7 +1210,12 @@ impl Task {
             },
             op::DAVE_EXECUTE_TRANSITION => {
                 match uint("transition_id").and_then(|v| u16::try_from(v).ok()) {
-                    Some(id) => self.dave.on_execute_transition(id).map(|()| Vec::new()),
+                    Some(id) => self.dave.on_execute_transition(id).map(|()| {
+                        if id > 0 {
+                            self.emit(VoiceEvent::DaveTransition(id));
+                        }
+                        Vec::new()
+                    }),
                     None => Err(crate::dave::DaveError::Malformed("DAVE_EXECUTE_TRANSITION")),
                 }
             }

@@ -1415,10 +1415,16 @@ service_test!(
         let (g, e) = env.svc.with_sup(|s| (s.generation(), s.epoch()));
         w.push_event(g, e, WorkerEventKind::NeedKeyframe, json!({}));
         wait_until_t(|| a.count("pli") == before + 1, 1.0).await;
-        // a second viewer PLI inside feedback_idr_min_interval_ms asks for nothing more
+        // viewer PLIs inside feedback_idr_min_interval_ms are not dropped: they coalesce into one
+        // ForceIdr sent once the interval ends
+        env.svc
+            .dispatch(AdapterEvent::Pool(PoolEvent::OutPli { account: None }));
         env.svc
             .dispatch(AdapterEvent::Pool(PoolEvent::OutPli { account: None }));
         assert_eq!(force(), 1);
+        wait_until_t(|| force() == 2, 2.0).await;
+        sleep(0.7).await;
+        assert_eq!(force(), 2);
         env.shutdown(task).await;
     }
 );

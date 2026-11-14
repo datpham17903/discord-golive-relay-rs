@@ -652,6 +652,8 @@ struct Hot {
     /// Viewer PLIs since the last forwarded keyframe, and when the first of them came.
     viewer_plis: u64,
     first_viewer_pli: Option<f64>,
+    /// The trailing feedback IDR deferred by the rate limit.
+    idr_timer: Option<AbortHandle>,
 }
 
 struct Timing {
@@ -755,6 +757,8 @@ pub struct Service {
     voice_lost_grace: f64,
     peer_is_operator: OperatorCheck,
     feedback_min: f64,
+    /// `need_idr` also runs on the publishers' pacer threads, outside the runtime.
+    rt: tokio::runtime::Handle,
     sup: Mutex<Supervisor>,
     pool: Mutex<OutputPool>,
     publisher: Arc<Publisher>,
@@ -966,6 +970,7 @@ impl Service {
                 voice_lost_grace: opts.voice_lost_grace_s,
                 peer_is_operator: opts.peer_is_operator,
                 feedback_min,
+                rt: tokio::runtime::Handle::current(),
                 sup: Mutex::new(sup),
                 pool: Mutex::new(pool),
                 publisher,
@@ -980,6 +985,7 @@ impl Service {
                     overflow_reported: None,
                     viewer_plis: 0,
                     first_viewer_pli: None,
+                    idr_timer: None,
                 }),
                 core: Mutex::new(core),
                 events_tx,
@@ -3609,7 +3615,6 @@ impl Service {
         );
     }
 
-    /// Publisher callback (any thread): feedback IDR, at most one per min interval.
     /// A viewer of an output (`None` = the ingest's own) asked for a keyframe.
     fn viewer_pli(&self, account: Option<u64>) {
         {
@@ -3622,23 +3627,45 @@ impl Service {
         self.need_idr();
     }
 
+    /// Publisher callback (any thread): feedback IDR, at most one per min interval.
     pub fn need_idr(&self) {
         let now = monotonic();
         let mut h = self.hot.lock();
-        let Some(worker) = h.worker.clone() else {
-            return;
-        };
-        if now - h.last_idr_req < self.feedback_min {
+        if h.worker.is_none() {
             return;
         }
-        h.last_idr_req = now;
-        worker.send(
-            ForceIdr {
-                generation: h.generation,
-                epoch: h.epoch,
-            }
-            .into(),
-        );
+        let wait = h.last_idr_req + self.feedback_min - now;
+        if wait <= 0.0 {
+            h.last_idr_req = now;
+            Self::force_idr(&h);
+        } else if h.idr_timer.is_none() {
+            // Defer one trailing request instead of dropping it: a viewer who joined just as a
+            // keyframe went out (under the DAVE key it cannot read yet) asks again at once, and a
+            // dropped ask leaves it black until its own retry two seconds later.
+            let me = self.me.clone();
+            let timer = self.rt.spawn(async move {
+                tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                if let Some(s) = me.upgrade() {
+                    let mut h = s.hot.lock();
+                    h.idr_timer = None;
+                    h.last_idr_req = monotonic();
+                    Self::force_idr(&h);
+                }
+            });
+            h.idr_timer = Some(timer.abort_handle());
+        }
+    }
+
+    fn force_idr(h: &Hot) {
+        if let Some(worker) = &h.worker {
+            worker.send(
+                ForceIdr {
+                    generation: h.generation,
+                    epoch: h.epoch,
+                }
+                .into(),
+            );
+        }
     }
 
     fn pump_worker(&self, c: &mut Core, worker: &Arc<dyn Worker>) {

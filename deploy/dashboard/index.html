@@ -90,6 +90,7 @@ th { color: var(--muted); font-weight: 600; border-top: 0; }
     <div class="grid">
       <div class="metric"><div class="v" id="m-uptime">—</div><div class="k">Chiếu liên tục</div></div>
       <div class="metric"><div class="v" id="m-fps">—</div><div class="k">Khung hình/giây</div></div>
+      <div class="metric"><div class="v" id="m-bitrate">—</div><div class="k">Bitrate video</div></div>
       <div class="metric"><div class="v" id="m-pps">—</div><div class="k">Gói video/giây</div></div>
       <div class="metric"><div class="v" id="m-loss">—</div><div class="k">Gói mất (đã bù lại)</div></div>
       <div class="metric"><div class="v" id="m-viewers">—</div><div class="k">Người xem relay</div></div>
@@ -197,6 +198,7 @@ function render(s) {
   $("m-uptime").textContent = live ? fmtDur(s.session_uptime_s) : "—";
   $("m-fps").textContent = live ? num(s.fps) : "—";
   $("m-pps").textContent = live ? num(s.pps) : "—";
+  $("m-bitrate").textContent = live && s.kbps != null ? num(s.kbps / 1000, 2) + " Mbps" : "—";
   $("m-loss").textContent = live && s.loss_pct != null ? num(s.loss_pct, 1) + "%" : "—";
   $("m-viewers").textContent = s.online ? num(s.relay_viewers) : "—";
   $("m-outputs").textContent = s.online ? `${num(s.outputs_live)} / ${num(s.mirrors)}` : "—";

@@ -73,6 +73,8 @@ struct Prev {
     pkts: Option<f64>,
     rtx: Option<f64>,
     frames: Option<f64>,
+    /// Non-RTX video payload bytes; absent before v0.1.9.
+    bytes: Option<f64>,
 }
 
 /// (packets/s, frames/s, rtx loss %) between two polls; `None` when a counter is missing or went
@@ -95,6 +97,13 @@ fn rates(p: &Prev, c: &Prev) -> Option<(f64, f64, f64)> {
     } else {
         None
     }
+}
+
+/// Video payload kbit/s between two polls; `None` when the counter is missing or went backwards.
+fn kbps(p: &Prev, c: &Prev) -> Option<f64> {
+    let (b0, b1) = (p.bytes?, c.bytes?);
+    let dt = c.t - p.t;
+    (dt > 0.0 && b1 >= b0).then(|| (b1 - b0) * 8.0 / dt / 1000.0)
 }
 
 /// Id of a JSON number or string, as the string key used by `names` and `routing.mirrors`.
@@ -341,8 +350,10 @@ impl Collector {
                     pkts: w["video_packets_received"].as_f64(),
                     rtx: w["rtx_packets_received"].as_f64(),
                     frames: s["metrics"]["gauges"]["worker.frames_out"].as_f64(),
+                    bytes: w["video_payload_bytes"].as_f64(),
                 };
                 let r = st.prev.as_ref().and_then(|p| rates(p, &cur));
+                let kbps = st.prev.as_ref().and_then(|p| kbps(p, &cur));
                 st.prev = Some(cur);
                 let accounts: &[Value] = s["accounts"].as_array().map_or(&[], Vec::as_slice);
                 let live = |a: &&Value| a["state"] == "live";
@@ -374,6 +385,7 @@ impl Collector {
                     ("outputs_live", json!(accounts.iter().filter(live).count())),
                     ("mirrors", json!(mirrors)),
                     ("pps", json!(pps)),
+                    ("kbps", json!(kbps)),
                     ("fps", json!(fps)),
                     ("loss_pct", json!(loss)),
                 ] {
@@ -777,6 +789,24 @@ mod tests {
         assert!(c.st.lock().snapshot["stream_full_s"].is_null());
         c.poll_status(110.0, None);
         assert!(!c.st.lock().snapshot.contains_key("stream_full_s"));
+    }
+
+    #[test]
+    fn bitrate_from_payload_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = collector(dir.path());
+        let with_bytes = |b: u64| {
+            let mut s = status(1, 0, 1);
+            s["network"]["watch"]["video_payload_bytes"] = json!(b);
+            s
+        };
+        c.poll_status(100.0, Some((with_bytes(1_000_000), 1.0)));
+        assert!(c.st.lock().snapshot["kbps"].is_null());
+        c.poll_status(105.0, Some((with_bytes(1_625_000), 1.0)));
+        assert_eq!(c.st.lock().snapshot["kbps"], 1000.0);
+        // an older relay without the counter
+        c.poll_status(110.0, Some((status(1, 0, 1), 1.0)));
+        assert!(c.st.lock().snapshot["kbps"].is_null());
     }
 
     #[test]

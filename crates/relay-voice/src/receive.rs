@@ -799,6 +799,9 @@ impl Receiver {
         match codec {
             PacketCodec::Video(video) => {
                 self.stat(st, "video_packets_received", 1);
+                if !rtx {
+                    self.stat(st, "video_payload_bytes", d.payload.len() as u64);
+                }
                 self.maybe_send_startup_pli(st, video, ssrc);
                 if !rtx {
                     self.maybe_send_receiver_report(st, ssrc, d.sequence, d.timestamp, received_at);

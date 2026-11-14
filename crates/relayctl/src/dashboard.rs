@@ -122,6 +122,25 @@ fn topology(s: &Value, names: &Value) -> Map<String, Value> {
         .as_array()
         .map_or(&[][..], Vec::as_slice);
     let mut outputs = Vec::new();
+    let ingest = id_str(&s["ingest_user_id"]);
+    if ingest.is_some() {
+        let state = match s["state"].as_str() {
+            Some("relaying") => "watching",
+            Some("connecting" | "backoff" | "hold") => "connecting",
+            _ => "off",
+        };
+        let channel_id = id_str(&routing["channel_id"]);
+        outputs.push(json!({
+            "name": name("users", ingest.clone()),
+            "user_id": ingest,
+            "role": "ingest",
+            "state": state,
+            "channel": name("channels", channel_id.clone()),
+            "channel_id": channel_id,
+            "viewers": null,
+            "uptime_s": null,
+        }));
+    }
     let mut free = 0;
     for r in rows {
         let (id, role, state) = (id_str(&r[0]), r[1].as_str(), r[3].as_str());
@@ -814,6 +833,7 @@ mod tests {
             "state": "relaying",
             "routing": {"target_user_id": "11", "channel_id": "500",
                         "mirrors": {"501": 22}},
+            "ingest_user_id": 20,
             "details": {"accounts": [
                 [21, "relay", 500, "live", 90.5, 4],
                 [22, "mirror", 501, "live", 30.0, 1],
@@ -823,7 +843,7 @@ mod tests {
             ]},
         });
         if with_names {
-            s["names"] = json!({"users": {"11": "Tai", "21": "Relay1", "22": "Mir<b>"},
+            s["names"] = json!({"users": {"11": "Tai", "20": "Ing", "21": "Relay1", "22": "Mir<b>"},
                                 "channels": {"500": "Main", "501": "Side"}});
         }
         s
@@ -842,7 +862,13 @@ mod tests {
                     "account_id": "22"}])
         );
         let o = t["outputs"].as_array().unwrap();
-        assert_eq!(o.len(), 5);
+        assert_eq!(o.len(), 6);
+        assert_eq!(
+            o[0],
+            json!({"name": "Ing", "user_id": "20", "role": "ingest", "state": "watching",
+                   "channel": "Main", "channel_id": "500", "viewers": null, "uptime_s": null})
+        );
+        let o = &o[1..];
         assert_eq!(
             o[0],
             json!({"name": "Relay1", "user_id": "21", "role": "relay", "state": "live",
@@ -859,8 +885,8 @@ mod tests {
         let t = topology(&s, &s["names"]);
         assert_eq!(t["target"], json!({"name": null, "id": "11"}));
         assert_eq!(t["channel"], json!({"name": null}));
-        assert_eq!(t["outputs"][1]["channel"], Value::Null);
-        assert_eq!(t["outputs"][1]["channel_id"], "501");
+        assert_eq!(t["outputs"][2]["channel"], Value::Null);
+        assert_eq!(t["outputs"][2]["channel_id"], "501");
         assert_eq!(t["mirror_list"][0]["account"], Value::Null);
         assert_eq!(t["free_mirrors"], 2);
     }
@@ -873,7 +899,7 @@ mod tests {
         c.poll_status(102.0, Some((topo_status(false), 0.0)));
         let snap = c.st.lock().snapshot.clone();
         assert_eq!(snap["target"]["name"], "Tai");
-        assert_eq!(snap["outputs"][0]["name"], "Relay1");
+        assert_eq!(snap["outputs"][1]["name"], "Relay1");
         std::fs::write(
             dir.path().join("relay.log"),
             "

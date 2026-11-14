@@ -3721,6 +3721,10 @@ impl Service {
             d.insert("network".into(), net);
         }
         d.insert("accounts".into(), Value::Array(accounts));
+        d.insert(
+            "ingest_user_id".into(),
+            json!(self.cfg.discord.expected_relay_user_id),
+        );
         let mut users = BTreeSet::from([
             routing.target_user_id,
             self.cfg.discord.expected_relay_user_id,

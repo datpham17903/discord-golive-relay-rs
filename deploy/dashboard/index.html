@@ -217,10 +217,10 @@ function drawTopology(s) {
   const user = (name, id) => (name != null ? esc(name) : "—") +
     (id != null ? ` <small class="muted">${esc(id)}</small>` : "");
   $("who").innerHTML = s.online ? `Target: <b>${user(s.target && s.target.name, s.target && s.target.id)}</b> · Kênh chính: <b>${nm(s.channel)}</b>` : "—";
-  const OUT = { live: "Đang phát", off: "Nghỉ" };
+  const OUT = { live: "Đang phát", off: "Nghỉ", watching: "Đang xem target", connecting: "Đang kết nối" };
   const outs = s.online ? s.outputs || [] : [];
   $("outputs").innerHTML = outs.length ? outs.map(o => `<tr><td>${user(o.name, o.user_id)}</td>` +
-    `<td>${o.role === "mirror" ? "mirror" : "relay"}</td><td>${esc(OUT[o.state] || o.state || "—")}</td>` +
+    `<td>${o.role === "mirror" || o.role === "ingest" ? o.role : "relay"}</td><td>${esc(OUT[o.state] || o.state || "—")}</td>` +
     `<td>${o.channel != null ? esc(o.channel) : o.channel_id != null ? esc(o.channel_id) : "—"}</td>` +
     `<td>${o.viewers == null ? "—" : num(o.viewers)}</td></tr>`).join("")
     : `<tr><td colspan="5" class="muted">Chưa có dữ liệu</td></tr>`;

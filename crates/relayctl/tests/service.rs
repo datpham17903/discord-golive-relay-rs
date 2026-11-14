@@ -3554,3 +3554,35 @@ service_test!(test_stop_signal_cancels_restart, async {
     env.shutdown(task).await;
     assert!(!env.svc.restart_wanted());
 });
+
+service_test!(test_keyframe_log_counts_viewer_and_upstream_plis, async {
+    let env = env(Setup::default());
+    let task = env.reach_relaying().await;
+    let a = env.adapter(0);
+    env.svc
+        .dispatch(AdapterEvent::Pool(PoolEvent::OutPli { account: Some(7) }));
+    let (g, e) = env.svc.with_sup(|s| (s.generation(), s.epoch()));
+    env.svc.on_worker_event(WorkerEvent {
+        generation: g,
+        epoch: e,
+        kind: WorkerEventKind::NeedKeyframe,
+        data: Map::new(),
+    });
+    wait_until_t(|| a.count("pli") >= 1, 1.0).await;
+    let mut data = Map::new();
+    data.insert("bytes".into(), json!(1234));
+    env.svc.on_worker_event(WorkerEvent {
+        generation: g,
+        epoch: e,
+        kind: WorkerEventKind::Keyframe,
+        data,
+    });
+    env.shutdown(task).await;
+    assert_eq!(env.logged("viewer_pli")[0]["output"], "7");
+    assert!(!env.logged("upstream_pli").is_empty());
+    let k = &env.logged("keyframe")[0];
+    assert_eq!(k["bytes"], 1234);
+    assert_eq!(k["viewer_plis"], 1);
+    assert!(k["upstream_plis"].as_u64().unwrap() >= 1);
+    assert!(k["since_viewer_pli_ms"].is_number());
+});

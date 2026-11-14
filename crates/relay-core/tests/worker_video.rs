@@ -279,7 +279,8 @@ fn datas(v: &[EgressVideo]) -> Vec<&[u8]> {
 }
 
 use WorkerEventKind::{
-    FirstFrame, FreshFrame, NeedKeyframe, Overflow, SourceCodec, SourceIneligible, Stats,
+    FirstFrame, FreshFrame, KeyWait, Keyframe, NeedKeyframe, Overflow, SourceCodec,
+    SourceIneligible, Stats,
 };
 
 // ------------------------------------------------------------------ passthrough
@@ -1590,4 +1591,22 @@ fn stall_of_850ms_through_real_egress_and_publisher_is_not_skipped() {
             assert!(l < ADAPT_MAX_S + 0.05, "wake {wake_s}, stall {stall}: {l}");
         }
     }
+}
+
+#[test]
+fn test_forwarded_keyframe_and_key_wait_are_reported() {
+    let idr = idr240();
+    let aus = h264_stream(&idr, JITTER_MAX_FRAMES + 7);
+    let mut r = make_worker(profile());
+    feed(&mut r, &aus[..3], T0);
+    let keys = r.events(Keyframe);
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].data["bytes"], idr.len());
+    assert!(r.events(KeyWait).is_empty());
+    for (i, au) in aus.iter().enumerate().skip(3) {
+        r.handle(vmsg(1, 0, "H264", 1, (i * 3000) as u32, T0, au.clone()), T0); // never ticked
+    }
+    let waits = r.events(KeyWait);
+    assert_eq!(waits.len(), 1, "reported once per wait");
+    assert_eq!(waits[0].data["reason"], "jitter_overflow");
 }

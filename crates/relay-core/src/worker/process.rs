@@ -328,6 +328,7 @@ impl Worker {
                     self.src_state = None; // source_codec is announced again at the next entry point
                     self.announce_fresh = true;
                     if self.pt_active {
+                        self.note_key_wait("output_enabled");
                         self.request_keyframe(now); // output restarts from a source IDR
                     }
                 }
@@ -347,6 +348,13 @@ impl Worker {
 
     // ------------------------------------------------------------ video
 
+    /// Reports the moment passthrough starts waiting for an entry point.
+    fn note_key_wait(&self, reason: &'static str) {
+        if self.pt_active && !self.need_key {
+            self.event(WorkerEventKind::KeyWait, json!({"reason": reason}));
+        }
+    }
+
     pub fn request_keyframe(&mut self, now: f64) {
         self.need_key = true;
         self.emit_need_keyframe(now);
@@ -362,6 +370,7 @@ impl Worker {
     fn video(&mut self, m: IngressVideo, now: f64) {
         if now - m.mono_received > INGRESS_MAX_AGE_S {
             self.stats.ingress_dropped += 1;
+            self.note_key_wait("ingress_late");
             if self.pt_active {
                 self.jbuf.clear(); // an access unit is never dropped alone
             }
@@ -371,6 +380,7 @@ impl Worker {
         if m.gap {
             // frames were lost before this one: nothing but an entry point may follow
             self.stats.gap_frames += 1;
+            self.note_key_wait("frame_gap");
             self.need_key = true;
             if !bitstream::is_entry_point(&m.codec, &m.data) {
                 // an entry point already repairs the stream
@@ -445,7 +455,7 @@ impl Worker {
             };
             let Some(dims) = dims else {
                 // an entry point whose size cannot be read: unusable, wait for a clean one
-                self.pt_resync(now);
+                self.pt_resync(now, "unreadable_entry");
                 return;
             };
             // outside adaptive mode only H.264 is relayed
@@ -490,7 +500,7 @@ impl Worker {
             self.offsets.clear();
             self.lateness.clear();
             if !key {
-                self.pt_resync(now);
+                self.pt_resync(now, "ssrc_change");
                 return;
             }
         }
@@ -507,7 +517,7 @@ impl Worker {
         });
         if self.jbuf.len() > JITTER_MAX_FRAMES {
             self.stats.backpressure_skips += self.jbuf.len() as u64;
-            self.pt_resync(now);
+            self.pt_resync(now, "jitter_overflow");
         }
     }
 
@@ -541,7 +551,8 @@ impl Worker {
         }
     }
 
-    fn pt_resync(&mut self, now: f64) {
+    fn pt_resync(&mut self, now: f64, reason: &'static str) {
+        self.note_key_wait(reason);
         self.jbuf.clear();
         self.request_keyframe(now);
     }
@@ -635,6 +646,9 @@ impl Worker {
             self.stats.frames_out += 1;
             self.stats.passthrough_frames += 1;
             self.stats.idr += u64::from(idr);
+            if idr {
+                self.event(WorkerEventKind::Keyframe, json!({"bytes": size}));
+            }
             if overdue {
                 // from the previous slot, not from `now`: a late tick must not slow the catch-up
                 let step = frame_time_ms / 1000.0 * CATCHUP_FACTOR;
@@ -642,7 +656,7 @@ impl Worker {
             }
         } else {
             self.stats.egress_dropped += 1;
-            self.pt_resync(now);
+            self.pt_resync(now, "egress_full");
             if now - self.last_overflow_event >= OVERFLOW_EVENT_INTERVAL_S {
                 self.last_overflow_event = now;
                 self.event(

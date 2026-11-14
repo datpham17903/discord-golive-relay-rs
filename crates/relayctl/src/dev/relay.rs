@@ -331,7 +331,7 @@ impl Relay {
                     Value::Object(data),
                 );
             }
-            WorkerEventKind::FreshFrame => {}
+            WorkerEventKind::FreshFrame | WorkerEventKind::KeyWait | WorkerEventKind::Keyframe => {}
         }
     }
 

@@ -102,6 +102,29 @@ pub const OUT_LOGIN_WAIT_S: f64 = 30.0;
 pub const SLATE_CACHE_SIZE: usize = 4;
 /// Adaptive: a bound output silent this long while the source flows is re-swapped.
 pub const CODEC_STALL_S: f64 = 5.0;
+/// Relaying without video egress this long is logged as `video_stall`.
+const VIDEO_STALL_S: f64 = 1.0;
+/// Interval of the `stats` log line while a session runs.
+const STATS_LOG_S: f64 = 30.0;
+const STALL_COUNTERS: &[&str] = &[
+    "video_packets_received",
+    "rtx_packets_received",
+    "video_frames_completed",
+    "video_frames_dropped_at_marker",
+    "video_nack_packets_sent",
+    "video_sequence_gaps",
+];
+
+/// `after - before` for every numeric key of `after`.
+fn counter_delta(before: &Value, after: &Value) -> Value {
+    let mut out = Map::new();
+    for (k, v) in after.as_object().into_iter().flatten() {
+        if let (Some(a), Some(b)) = (v.as_i64(), before[k].as_i64()) {
+            out.insert(k.clone(), json!(a - b));
+        }
+    }
+    Value::Object(out)
+}
 /// > `CONNECT_TIMEOUT_S`: the library may still recover a 4014 or resume a 4015.
 pub const VOICE_LOST_GRACE_S: f64 = 20.0;
 /// At most one adapter restart for repeated voice close 4006 per 5 minutes.
@@ -626,6 +649,9 @@ struct Hot {
     audio_dropped: u64,
     /// (generation, epoch) whose video overflow was already reported.
     overflow_reported: Option<(u64, u64)>,
+    /// Viewer PLIs since the last forwarded keyframe, and when the first of them came.
+    viewer_plis: u64,
+    first_viewer_pli: Option<f64>,
 }
 
 struct Timing {
@@ -648,6 +674,12 @@ struct Core {
     codec_ctl: CodecController,
     stall_kick: HashMap<OutputId, f64>,
     last_egress_at: f64,
+    /// PLIs sent to the target since the last forwarded keyframe, and when the first went out.
+    upstream_plis: u64,
+    first_upstream_pli: Option<f64>,
+    /// Start of a relaying stretch without video egress, and the watch counters at its start.
+    stall: Option<(f64, Value)>,
+    next_stats_log: f64,
     /// Source size while it is passthrough-eligible.
     src_dims: Option<(u32, u32)>,
     autoscale: bool,
@@ -822,6 +854,10 @@ impl Service {
             codec_ctl: CodecController::new(),
             stall_kick: HashMap::new(),
             last_egress_at: f64::NEG_INFINITY,
+            upstream_plis: 0,
+            first_upstream_pli: None,
+            stall: None,
+            next_stats_log: f64::NEG_INFINITY,
             src_dims: None,
             autoscale,
             chat_ops: st.chat_operator_ids.iter().copied().collect(),
@@ -942,6 +978,8 @@ impl Service {
                     last_idr_req: f64::NEG_INFINITY,
                     audio_dropped: 0,
                     overflow_reported: None,
+                    viewer_plis: 0,
+                    first_viewer_pli: None,
                 }),
                 core: Mutex::new(core),
                 events_tx,
@@ -1169,7 +1207,7 @@ impl Service {
             AdapterEvent::Model(e) => self.handle(c, e),
             AdapterEvent::Chat(cmd) => self.on_chat(c, cmd),
             // a viewer PLI: the worker answers it
-            AdapterEvent::Pool(PoolEvent::OutPli { .. }) => self.need_idr(),
+            AdapterEvent::Pool(PoolEvent::OutPli { account }) => self.viewer_pli(account),
             AdapterEvent::Pool(e) => self.pool_event(c, e),
         }
     }
@@ -1185,6 +1223,8 @@ impl Service {
                 self.pool_event(&mut c, PoolEvent::OutTick);
                 self.codec_event(&mut c, CodecEvent::Tick);
                 self.check_codec_stall_locked(&mut c, now);
+                self.check_video_stall_locked(&mut c, now);
+                self.log_stats_locked(&mut c, now);
                 self.sample_sends(&mut c, now);
                 // OutTick above stops extra relays whose Go Live stayed without viewers
                 self.scale_relays(&mut c, now);
@@ -2053,8 +2093,8 @@ impl Service {
                     json!({"account": account, "channel": channel}),
                 );
             }
-            PoolEvent::OutPli { .. } => {
-                self.need_idr();
+            PoolEvent::OutPli { account } => {
+                self.viewer_pli(*account);
                 return;
             }
             PoolEvent::OutCodecChanged {
@@ -3043,10 +3083,13 @@ impl Service {
     }
 
     /// request_pli only sends one RTCP packet, so it never waits behind a slow queued op.
-    fn pli(&self, c: &Core) {
+    fn pli(&self, c: &mut Core) {
         if c.adapter.is_none() {
             return;
         }
+        c.upstream_plis += 1;
+        c.first_upstream_pli.get_or_insert_with(monotonic);
+        self.log("upstream_pli", json!({}));
         let s = self.arc();
         self.spawn_tracked(async move { s.keyframe(KeyframeMethod::Pli).await });
     }
@@ -3065,7 +3108,7 @@ impl Service {
                 let mut c = s.core.lock();
                 c.pli_timer = None;
                 c.last_pli = monotonic();
-                s.pli(&c);
+                s.pli(&mut c);
             });
             c.pli_timer = Some(timer.abort_handle());
         }
@@ -3196,6 +3239,67 @@ impl Service {
                 }),
             }
         }
+    }
+
+    /// Logs the start of a relaying stretch without video egress (its end is logged by the pump).
+    fn check_video_stall_locked(&self, c: &mut Core, now: f64) {
+        if c.stall.is_some()
+            || !c.last_egress_at.is_finite()
+            || now - c.last_egress_at <= VIDEO_STALL_S
+        {
+            return;
+        }
+        if self.sup.lock().state() != RelayState::Relaying {
+            return;
+        }
+        let counters = self.watch_counters(c);
+        self.log("video_stall", json!({"watch": counters}));
+        c.stall = Some((c.last_egress_at, counters));
+    }
+
+    /// Receive counters of the watch connection that explain a stall.
+    fn watch_counters(&self, c: &Core) -> Value {
+        let net = c
+            .adapter
+            .as_ref()
+            .map_or_else(|| json!({}), |a| a.network_stats());
+        let w = &net["watch"];
+        let mut out = Map::new();
+        for k in STALL_COUNTERS {
+            if let Some(v) = w.get(*k) {
+                out.insert((*k).into(), v.clone());
+            }
+        }
+        Value::Object(out)
+    }
+
+    /// Every [`STATS_LOG_S`] while a session runs: the receive, worker and per-output counters,
+    /// so a viewer report can be traced afterwards.
+    fn log_stats_locked(&self, c: &mut Core, now: f64) {
+        if now < c.next_stats_log {
+            return;
+        }
+        c.next_stats_log = now + STATS_LOG_S;
+        if matches!(
+            self.sup.lock().state(),
+            RelayState::Idle | RelayState::Disabled | RelayState::Fatal
+        ) {
+            return;
+        }
+        let d = self.status_dict_locked(c);
+        self.log(
+            "stats",
+            json!({
+                "state": d["state"],
+                "codec": d["codec"],
+                "channel_members": d["details"]["viewers"],
+                "network": d["network"],
+                "worker": d["metrics"]["gauges"],
+                "accounts": d["accounts"],
+                "ingest_send": d["ingest_send"],
+                "ingress_audio": d["ingress_audio"],
+            }),
+        );
     }
 
     /// An output bound to the current codec that sends nothing while the source flows is
@@ -3506,6 +3610,18 @@ impl Service {
     }
 
     /// Publisher callback (any thread): feedback IDR, at most one per min interval.
+    /// A viewer of an output (`None` = the ingest's own) asked for a keyframe.
+    fn viewer_pli(&self, account: Option<u64>) {
+        {
+            let mut h = self.hot.lock();
+            h.viewer_plis += 1;
+            h.first_viewer_pli.get_or_insert_with(monotonic);
+        }
+        let output = account.map_or_else(|| json!("ingest"), |a| json!(a.to_string()));
+        self.log("viewer_pli", json!({"output": output}));
+        self.need_idr();
+    }
+
     pub fn need_idr(&self) {
         let now = monotonic();
         let mut h = self.hot.lock();
@@ -3535,6 +3651,16 @@ impl Service {
             match item {
                 Egress::Video(au) => {
                     c.last_egress_at = monotonic();
+                    if let Some((since, before)) = c.stall.take() {
+                        let after = self.watch_counters(c);
+                        self.log(
+                            "video_stall_end",
+                            json!({
+                                "duration_ms": ((c.last_egress_at - since) * 1000.0).round(),
+                                "watch_delta": counter_delta(&before, &after),
+                            }),
+                        );
+                    }
                     for p in &publishers {
                         p.offer_video(au.clone());
                     }
@@ -3621,6 +3747,30 @@ impl Service {
                 },
             ),
             WorkerEventKind::NeedKeyframe => self.request_pli_locked(c),
+            WorkerEventKind::KeyWait => self.log("key_wait", Value::Object(ev.data)),
+            WorkerEventKind::Keyframe => {
+                let now = monotonic();
+                let ms = |t: Option<f64>| t.map(|t| ((now - t) * 1000.0).round());
+                let (viewer_plis, first_viewer) = {
+                    let mut h = self.hot.lock();
+                    (
+                        std::mem::take(&mut h.viewer_plis),
+                        h.first_viewer_pli.take(),
+                    )
+                };
+                let upstream_plis = std::mem::take(&mut c.upstream_plis);
+                let first_upstream = c.first_upstream_pli.take();
+                self.log(
+                    "keyframe",
+                    json!({
+                        "bytes": ev.data.get("bytes"),
+                        "viewer_plis": viewer_plis,
+                        "since_viewer_pli_ms": ms(first_viewer),
+                        "upstream_plis": upstream_plis,
+                        "since_upstream_pli_ms": ms(first_upstream),
+                    }),
+                );
+            }
             WorkerEventKind::Fatal => {
                 let reason = match ev.data.get("reason") {
                     Some(Value::String(s)) => s.clone(),

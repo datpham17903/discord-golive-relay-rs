@@ -125,6 +125,10 @@ pub enum WorkerEventKind {
     SourceCodec,
     SourceIneligible,
     NeedKeyframe,
+    /// Passthrough stopped forwarding until the next entry point; `reason` says why.
+    KeyWait,
+    /// A keyframe was forwarded; `bytes` is its size.
+    Keyframe,
     DecodeError,
     Overflow,
     Stats,
@@ -139,6 +143,8 @@ impl WorkerEventKind {
             Self::SourceCodec => "source_codec",
             Self::SourceIneligible => "source_ineligible",
             Self::NeedKeyframe => "need_keyframe",
+            Self::KeyWait => "key_wait",
+            Self::Keyframe => "keyframe",
             Self::DecodeError => "decode_error",
             Self::Overflow => "overflow",
             Self::Stats => "stats",

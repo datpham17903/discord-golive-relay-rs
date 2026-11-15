@@ -176,6 +176,10 @@ pub trait Adapter: Send + Sync {
     fn take_audio_window(&self) -> Value;
     /// Loss/NACK/RTX counters of the watch and output connections (empty when disabled).
     fn network_stats(&self) -> Value;
+    /// Who watches the ingest's own Go Live in the main channel; `None` when it is not seen.
+    fn own_stream_viewers(&self) -> Option<Vec<u64>> {
+        None
+    }
 }
 
 /// An extra output account: it only joins the allowed channel and publishes its own Go Live.

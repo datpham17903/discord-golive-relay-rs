@@ -146,7 +146,7 @@ fn topology(s: &Value, names: &Value) -> Map<String, Value> {
             "state": state,
             "channel": name("channels", channel_id.clone()),
             "channel_id": channel_id,
-            "viewers": null,
+            "viewers": s["ingest_viewers"],
             "uptime_s": null,
         }));
     }
@@ -380,10 +380,13 @@ impl Collector {
                                 .filter(live)
                                 .map(|a| a["viewers"].as_i64().unwrap_or(0))
                                 .sum::<i64>()
+                                + s["ingest_viewers"].as_i64().unwrap_or(0)
                         ),
                     ),
                     ("outputs_live", json!(accounts.iter().filter(live).count())),
                     ("mirrors", json!(mirrors)),
+                    ("cpu_pct", s["process"]["cpu_pct"].clone()),
+                    ("rss_mb", s["process"]["rss_mb"].clone()),
                     ("pps", json!(pps)),
                     ("kbps", json!(kbps)),
                     ("fps", json!(fps)),
@@ -789,6 +792,22 @@ mod tests {
         assert!(c.st.lock().snapshot["stream_full_s"].is_null());
         c.poll_status(110.0, None);
         assert!(!c.st.lock().snapshot.contains_key("stream_full_s"));
+    }
+
+    #[test]
+    fn ingest_viewers_and_process_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = collector(dir.path());
+        let mut s = status(1, 0, 1);
+        s["ingest_viewers"] = json!(5);
+        s["process"] = json!({"cpu_pct": 12.5, "rss_mb": 48.2});
+        s["ingest_user_id"] = json!(20);
+        c.poll_status(100.0, Some((s.clone(), 1.0)));
+        let st = c.st.lock();
+        assert_eq!(st.snapshot["relay_viewers"], 8);
+        assert_eq!(st.snapshot["cpu_pct"], 12.5);
+        assert_eq!(st.snapshot["rss_mb"], 48.2);
+        assert_eq!(topology(&s, &json!({}))["outputs"][0]["viewers"], 5);
     }
 
     #[test]

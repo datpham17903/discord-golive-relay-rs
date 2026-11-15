@@ -731,6 +731,9 @@ struct Core {
     persist_failed: bool,
     last_pli: f64,
     pli_timer: Option<AbortHandle>,
+    /// (CPU ticks, monotonic time) of the last CPU sample, and the usage it gave.
+    cpu_sample: Option<(f64, f64)>,
+    cpu_pct: Option<f64>,
     last_overflow: f64,
     worker_dead_reported: bool,
     metrics: Metrics,
@@ -900,6 +903,8 @@ impl Service {
             persist_failed: false,
             last_pli: f64::NEG_INFINITY,
             pli_timer: None,
+            cpu_sample: None,
+            cpu_pct: None,
             last_overflow: f64::NEG_INFINITY,
             worker_dead_reported: false,
             metrics: Metrics::new(),
@@ -3911,6 +3916,17 @@ impl Service {
             "ingest_user_id".into(),
             json!(self.cfg.discord.expected_relay_user_id),
         );
+        let ingest_viewers = c
+            .adapter
+            .as_ref()
+            .filter(|_| self.cfg.discord.ingest_publishes)
+            .and_then(|a| a.own_stream_viewers())
+            .map(|ids| {
+                let bots = self.bot_ids(routing.target_user_id);
+                ids.iter().filter(|u| !bots.contains(u)).count()
+            });
+        d.insert("ingest_viewers".into(), json!(ingest_viewers));
+        d.insert("process".into(), process_stats(c, now));
         let mut users = BTreeSet::from([
             routing.target_user_id,
             self.cfg.discord.expected_relay_user_id,
@@ -3947,17 +3963,23 @@ impl Service {
         Value::Object(d)
     }
 
-    /// Main-channel members other than the target and the configured bot accounts.
-    fn viewers(&self) -> usize {
-        let sup = self.sup.lock();
+    /// The target and the configured bot accounts: never counted as viewers.
+    fn bot_ids(&self, target: u64) -> HashSet<u64> {
         let mut bots: HashSet<u64> = self
             .cfg
             .output_accounts()
             .iter()
             .map(|a| a.user_id)
             .collect();
-        bots.insert(sup.routing().target_user_id);
+        bots.insert(target);
         bots.insert(self.cfg.discord.expected_relay_user_id);
+        bots
+    }
+
+    /// Main-channel members other than the target and the configured bot accounts.
+    fn viewers(&self) -> usize {
+        let sup = self.sup.lock();
+        let bots = self.bot_ids(sup.routing().target_user_id);
         sup.participants()
             .map_or(0, |p| p.iter().filter(|u| !bots.contains(u)).count())
     }
@@ -4498,6 +4520,39 @@ impl Service {
         self.log_timing(&mut c, g, "test");
         c.timing = saved;
     }
+}
+
+/// Linux `USER_HZ`: /proc reports CPU time in these ticks.
+const CLK_TCK: f64 = 100.0;
+
+/// CPU use (% of one core, over at least the last second) and resident memory of this process,
+/// read from /proc; null where /proc is missing.
+fn process_stats(c: &mut Core, now: f64) -> Value {
+    // utime and stime are fields 14 and 15; the name before them may contain spaces
+    let ticks = std::fs::read_to_string("/proc/self/stat").ok().and_then(|s| {
+        let f: Vec<&str> = s.rsplit_once(')')?.1.split_whitespace().collect();
+        Some(f.get(11)?.parse::<f64>().ok()? + f.get(12)?.parse::<f64>().ok()?)
+    });
+    if let Some(t) = ticks {
+        match c.cpu_sample {
+            Some((t0, at)) if now - at >= 1.0 => {
+                c.cpu_pct = Some((t - t0) / CLK_TCK / (now - at) * 100.0);
+                c.cpu_sample = Some((t, now));
+            }
+            None => c.cpu_sample = Some((t, now)),
+            Some(_) => {}
+        }
+    }
+    let rss_kb = std::fs::read_to_string("/proc/self/status").ok().and_then(|s| {
+        s.lines()
+            .find_map(|l| l.strip_prefix("VmRSS:"))
+            .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<f64>().ok())
+    });
+    let round1 = |v: f64| (v * 10.0).round() / 10.0;
+    json!({
+        "cpu_pct": c.cpu_pct.map(round1),
+        "rss_mb": rss_kb.map(|kb| round1(kb / 1024.0)),
+    })
 }
 
 /// Moves a `JoinHandle` result of the join task into the adapter's error type.

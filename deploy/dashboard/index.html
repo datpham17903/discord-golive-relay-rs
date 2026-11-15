@@ -94,7 +94,10 @@ th { color: var(--muted); font-weight: 600; border-top: 0; }
       <div class="metric"><div class="v" id="m-pps">—</div><div class="k">Gói video/giây</div></div>
       <div class="metric"><div class="v" id="m-loss">—</div><div class="k">Gói mất (đã bù lại)</div></div>
       <div class="metric"><div class="v" id="m-viewers">—</div><div class="k">Người xem relay</div></div>
+      <div class="metric"><div class="v" id="m-members">—</div><div class="k">Người trong kênh chính</div></div>
       <div class="metric"><div class="v" id="m-outputs">—</div><div class="k">Luồng phát / mirror</div></div>
+      <div class="metric"><div class="v" id="m-cpu">—</div><div class="k">CPU relay</div></div>
+      <div class="metric"><div class="v" id="m-ram">—</div><div class="k">RAM relay</div></div>
     </div>
   </section>
 
@@ -202,6 +205,9 @@ function render(s) {
   $("m-loss").textContent = live && s.loss_pct != null ? num(s.loss_pct, 1) + "%" : "—";
   $("m-viewers").textContent = s.online ? num(s.relay_viewers) : "—";
   $("m-outputs").textContent = s.online ? `${num(s.outputs_live)} / ${num(s.mirrors)}` : "—";
+  $("m-members").textContent = s.online && s.channel_members != null ? num(s.channel_members) : "—";
+  $("m-cpu").textContent = s.online && s.cpu_pct != null ? num(s.cpu_pct, 1) + "%" : "—";
+  $("m-ram").textContent = s.online && s.rss_mb != null ? num(s.rss_mb) + " MB" : "—";
 
   for (const [k, id] of [["24h", "24"], ["7d", "7"]]) {
     const a = (s.availability || {})[k] || {};

@@ -1574,6 +1574,16 @@ impl Adapter for DiscordAdapter {
             .display_name(self.inner.opts.guild_id, user_id)
     }
 
+    fn own_stream_viewers(&self) -> Option<Vec<u64>> {
+        let (me, channel) = (self.inner.opts.relay_id, self.inner.channel_id());
+        self.inner
+            .cache
+            .read()
+            .streams()
+            .find(|s| s.key.owner_id() == me && s.key.channel_id() == Some(channel))
+            .map(|s| s.viewer_ids.clone())
+    }
+
     fn channel_name(&self, channel_id: u64) -> Option<String> {
         self.inner
             .cache

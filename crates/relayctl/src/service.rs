@@ -4529,10 +4529,12 @@ const CLK_TCK: f64 = 100.0;
 /// read from /proc; null where /proc is missing.
 fn process_stats(c: &mut Core, now: f64) -> Value {
     // utime and stime are fields 14 and 15; the name before them may contain spaces
-    let ticks = std::fs::read_to_string("/proc/self/stat").ok().and_then(|s| {
-        let f: Vec<&str> = s.rsplit_once(')')?.1.split_whitespace().collect();
-        Some(f.get(11)?.parse::<f64>().ok()? + f.get(12)?.parse::<f64>().ok()?)
-    });
+    let ticks = std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|s| {
+            let f: Vec<&str> = s.rsplit_once(')')?.1.split_whitespace().collect();
+            Some(f.get(11)?.parse::<f64>().ok()? + f.get(12)?.parse::<f64>().ok()?)
+        });
     if let Some(t) = ticks {
         match c.cpu_sample {
             Some((t0, at)) if now - at >= 1.0 => {
@@ -4543,11 +4545,13 @@ fn process_stats(c: &mut Core, now: f64) -> Value {
             Some(_) => {}
         }
     }
-    let rss_kb = std::fs::read_to_string("/proc/self/status").ok().and_then(|s| {
-        s.lines()
-            .find_map(|l| l.strip_prefix("VmRSS:"))
-            .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<f64>().ok())
-    });
+    let rss_kb = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("VmRSS:"))
+                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<f64>().ok())
+        });
     let round1 = |v: f64| (v * 10.0).round() / 10.0;
     json!({
         "cpu_pct": c.cpu_pct.map(round1),

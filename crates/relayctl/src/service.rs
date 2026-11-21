@@ -1297,7 +1297,8 @@ impl Service {
             return;
         }
         let since = *c.voice_dead_since.get_or_insert(now);
-        if now - since < self.voice_lost_grace {
+        // the grace is for the library's own recovery; once it gave up, waiting only costs time
+        if now - since < self.voice_lost_grace && !adapter.voice_given_up() {
             return;
         }
         c.voice_dead_since = None;

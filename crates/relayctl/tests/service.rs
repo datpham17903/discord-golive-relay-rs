@@ -191,6 +191,7 @@ struct FakeAdapter {
     voice_ids: Mutex<HashSet<u64>>,
     names: Mutex<HashMap<u64, String>>,
     alive: AtomicBool,
+    given_up: AtomicBool,
     foreign: AtomicBool,
     last_vsu: Mutex<Option<String>>,
     routing: Mutex<(u64, u64)>,
@@ -221,6 +222,7 @@ impl FakeAdapter {
             voice_ids: Mutex::new(HashSet::new()),
             names: Mutex::new(HashMap::new()),
             alive: AtomicBool::new(true),
+            given_up: AtomicBool::new(false),
             foreign: AtomicBool::new(false),
             last_vsu: Mutex::new(None),
             routing: Mutex::new((0, 0)),
@@ -374,6 +376,10 @@ impl Adapter for FakeAdapter {
 
     fn voice_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+    }
+
+    fn voice_given_up(&self) -> bool {
+        self.given_up.load(Ordering::SeqCst)
     }
 
     fn last_vsu_session(&self) -> Option<String> {
@@ -2594,6 +2600,26 @@ service_test!(test_ticker_reports_voice_lost_after_grace_only, async {
     assert_eq!(env.order().iter().filter(|o| *o == "leave").count(), 1);
     assert_eq!(env.svc.metrics()["counters"]["event.VoiceLost"], json!(1));
     assert!(!env.svc.in_voice() && a.count("join") == 1);
+    env.shutdown(task).await;
+});
+
+service_test!(test_voice_lost_at_once_when_the_library_gave_up, async {
+    let env = env(Setup {
+        voice_lost_grace_s: Some(30.0),
+        cfg: cfg(|c| {
+            c.runtime.prejoin_voice = true;
+            c.runtime.retry_delays_seconds = vec![30.0];
+        }),
+        ..Setup::default()
+    });
+    let task = env.start();
+    wait_until(|| env.adapter_started(0)).await;
+    let a = env.adapter(0);
+    a.emit(env.idle_snapshot());
+    wait_until(|| env.svc.in_voice()).await;
+    a.alive.store(false, Ordering::SeqCst);
+    a.given_up.store(true, Ordering::SeqCst);
+    wait_until_t(|| env.has_log("voice_lost"), 3.0).await;
     env.shutdown(task).await;
 });
 

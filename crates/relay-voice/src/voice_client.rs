@@ -239,6 +239,12 @@ impl VoiceClient {
         st.phase == Phase::Connected && st.conn.as_ref().is_none_or(|c| c.is_closed())
     }
 
+    /// Not joined and not on the way: after [`ClientEvent::Disconnected`] the client stays here,
+    /// nothing brings the connection back.
+    pub fn is_idle(&self) -> bool {
+        self.inner.state.lock().phase == Phase::Idle
+    }
+
     /// Negotiated media session of the voice connection (`audio_codec`, `video_codec`...).
     pub fn session_info(&self) -> Option<SessionInfo> {
         self.inner

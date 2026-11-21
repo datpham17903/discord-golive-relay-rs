@@ -971,6 +971,11 @@ impl Inner {
         vc.is_some_and(|vc| vc.is_connected() || vc.is_reconnecting())
     }
 
+    fn voice_given_up(&self) -> bool {
+        let vc = self.st.lock().vc.clone();
+        vc.is_some_and(|vc| vc.is_idle())
+    }
+
     /// Disconnects `vc` (already unregistered) while it still receives the dispatches it waits for.
     async fn disconnect_voice(&self, vc: VoiceClient) {
         self.st.lock().leaving = Some(vc.clone());
@@ -1610,6 +1615,10 @@ impl Adapter for DiscordAdapter {
 
     fn voice_alive(&self) -> bool {
         self.inner.voice_alive()
+    }
+
+    fn voice_given_up(&self) -> bool {
+        self.inner.voice_given_up()
     }
 
     fn last_vsu_session(&self) -> Option<String> {

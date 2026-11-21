@@ -46,6 +46,10 @@ const MAX_MESSAGE_SIZE: usize = 15 * 1024 * 1024;
 pub const RESUME_ATTEMPTS: u32 = 5;
 /// `_poll_voice_ws`: the server crashed and the session can be resumed.
 pub const CLOSE_RESUMABLE: u16 = 4015;
+/// Closes of a server going away or restarting (1001 going away, 1011 internal error, 1012
+/// restart, 1013 try again later), resumed like 4015. Live: Discord closes voice sockets with 1001
+/// "CloudFlare WebSocket proxy restarting", and giving up there restarted the whole relay session.
+pub const CLOSE_SERVER_GOING: [u16; 4] = [1001, 1011, 1012, 1013];
 
 pub mod op {
     pub const IDENTIFY: u8 = 0;
@@ -787,7 +791,7 @@ impl Exit {
     /// The server sent a close frame.
     fn closed(code: Option<u16>, reason: impl Into<String>) -> Self {
         Self {
-            resumable: code.is_none_or(|c| c == CLOSE_RESUMABLE),
+            resumable: code.is_none_or(|c| c == CLOSE_RESUMABLE || CLOSE_SERVER_GOING.contains(&c)),
             ..Self::new(code, reason)
         }
     }

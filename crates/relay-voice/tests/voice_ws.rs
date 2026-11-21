@@ -567,7 +567,7 @@ fn resumed_or_closed(e: &VoiceEvent) -> bool {
 
 #[tokio::test]
 async fn resumable_close_reconnects_with_resume_and_carries_on() {
-    for drop_kind in ["close 4015", "no close frame"] {
+    for drop_kind in ["close 4015", "close 1001", "close 1012", "no close frame"] {
         let mut h = start(|c| c.resume_on_drop = true).await;
         let identify = h.server.recv_json().await;
         assert_eq!(identify["op"], 0);
@@ -576,8 +576,8 @@ async fn resumable_close_reconnects_with_resume_and_carries_on() {
             .send(json!({"op": 15, "d": {"any": 100}, "seq": 9}))
             .await;
         events_until(&mut h.events, |e| matches!(e, VoiceEvent::Message { .. })).await;
-        if drop_kind == "close 4015" {
-            h.server.close(4015).await;
+        if let Some(code) = drop_kind.strip_prefix("close ") {
+            h.server.close(code.parse().unwrap()).await;
         }
         drop(h.server);
 

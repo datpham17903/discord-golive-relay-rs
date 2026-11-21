@@ -135,6 +135,10 @@ pub trait Adapter: Send + Sync {
     /// Joins the allowed channel muted; returns the voice session id.
     fn join(&self, on_voice_state: Option<VoiceStateCallback>) -> ApiFuture<'_, String>;
     fn voice_alive(&self) -> bool;
+    /// The voice connection ended for good (the library gave up, it will not recover).
+    fn voice_given_up(&self) -> bool {
+        false
+    }
     /// Session id of the last own voice state seen.
     fn last_vsu_session(&self) -> Option<String>;
     /// The last own voice state carried a session id other than this gateway session's.

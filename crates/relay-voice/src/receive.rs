@@ -365,7 +365,6 @@ struct ReorderBuffer {
     max_packets: usize,
     max_delay: Duration,
     expected: Option<i64>,
-    blocked_at: Option<Instant>,
     packets: BTreeMap<i64, Received>,
     pushed: u64,
     duplicates: u64,
@@ -384,7 +383,6 @@ impl ReorderBuffer {
             max_packets: max_packets.max(1),
             max_delay,
             expected: None,
-            blocked_at: None,
             packets: BTreeMap::new(),
             pushed: 0,
             duplicates: 0,
@@ -416,7 +414,6 @@ impl ReorderBuffer {
             }
             // The sender's sequence jumped by half the space or more: restart from here.
             self.packets.clear();
-            self.blocked_at = None;
             expected = i64::from(sequence);
             unwrapped = expected;
             self.expected = Some(expected);
@@ -427,30 +424,26 @@ impl ReorderBuffer {
         }
         self.packets.entry(unwrapped).or_insert(packet);
         self.max_buffered = self.max_buffered.max(self.packets.len() as u64);
-        let ready = self.pop_ready();
-        if !ready.is_empty() {
-            self.blocked_at = None;
-            self.ready += ready.len() as u64;
-            return ready;
+        let mut ready = self.pop_ready();
+        // The oldest packet held behind a gap waited long enough for the missing ones: skip ahead
+        // to it. The wait counts from its arrival, so after a long loss the gaps further on, whose
+        // packets arrived meanwhile, are skipped in the same call rather than one per `max_delay`
+        // (live: a 682-packet hole then kept the watch frozen for 50 s).
+        while let Some((&skip_to, oldest)) = self.packets.first_key_value() {
+            if self.packets.len() <= self.max_packets
+                && now.saturating_duration_since(oldest.received_at) < self.max_delay
+            {
+                if ready.is_empty() {
+                    self.waits += 1;
+                }
+                break;
+            }
+            let expected = self.expected.expect("set before any packet is held");
+            self.skipped += (skip_to - expected).max(0) as u64;
+            self.expected = Some(skip_to);
+            self.flushes += 1;
+            ready.extend(self.pop_ready());
         }
-        let blocked_at = *self.blocked_at.get_or_insert(now);
-        if self.packets.len() <= self.max_packets
-            && now.saturating_duration_since(blocked_at) < self.max_delay
-        {
-            self.waits += 1;
-            return Vec::new();
-        }
-        // Waited long enough for the missing packet(s): skip ahead to the oldest one held.
-        let skip_to = *self
-            .packets
-            .keys()
-            .next()
-            .expect("a packet was just inserted");
-        self.skipped += (skip_to - expected).max(0) as u64;
-        self.expected = Some(skip_to);
-        self.blocked_at = None;
-        self.flushes += 1;
-        let ready = self.pop_ready();
         self.ready += ready.len() as u64;
         ready
     }
@@ -1799,9 +1792,29 @@ mod tests {
         let mut buffer = ReorderBuffer::new(8, Duration::from_millis(500));
         buffer.push(received(1), t0);
         assert!(buffer.push(received(3), t0).is_empty());
-        let late = t0 + Duration::from_millis(501);
+        // the wait counts from packet 3's own arrival, a little after t0
+        let late = t0 + Duration::from_millis(600);
         assert_eq!(seqs(&buffer.push(received(4), late)), [3, 4]);
         assert_eq!((buffer.skipped, buffer.flushes), (1, 1));
+    }
+
+    #[test]
+    fn reorder_skips_every_gap_whose_packets_already_waited() {
+        let t0 = Instant::now();
+        let mut buffer = ReorderBuffer::new(8192, Duration::from_millis(500));
+        buffer.push(received(1), t0);
+        // a long hole (2..=99), then packets with smaller holes, all arriving during the wait
+        for s in [100u16, 101, 103, 104, 107, 108] {
+            assert!(buffer.push(received(s), t0).is_empty());
+        }
+        // the packets' own arrival times are a little after t0
+        let late = t0 + Duration::from_millis(600);
+        assert_eq!(
+            seqs(&buffer.push(received(109), late)),
+            [100, 101, 103, 104, 107, 108, 109]
+        );
+        assert_eq!((buffer.flushes, buffer.skipped), (3, 98 + 1 + 2));
+        assert!(buffer.packets.is_empty());
     }
 
     #[test]

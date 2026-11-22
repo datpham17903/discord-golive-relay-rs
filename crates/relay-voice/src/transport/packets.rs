@@ -30,7 +30,14 @@ const RTP_EXT_VIDEO_TIMING: u8 = 8;
 const RTP_EXT_MEDIA_STREAM_TYPE: u8 = 10;
 const RTP_EXT_RID: u8 = 11;
 const RTP_EXT_REPAIRED_RID: u8 = 12;
+/// How long before its deadline [`wait_until`] stops sleeping and spins: a sleep may overshoot by
+/// about this much. Linux and macOS sleeps land within ~0.1 ms; a 1 ms margin there spun ~1 ms on
+/// each of the ~110 wake-ups per second of every sender thread, ~10% of a core each (live: 27% CPU
+/// for two outputs). Windows sleeps are coarser.
+#[cfg(windows)]
 const PRECISE_SLEEP_MARGIN: Duration = Duration::from_millis(1);
+#[cfg(not(windows))]
+const PRECISE_SLEEP_MARGIN: Duration = Duration::from_micros(150);
 const PRECISE_SPIN_THRESHOLD: Duration = Duration::from_micros(250);
 
 #[derive(Debug, thiserror::Error)]

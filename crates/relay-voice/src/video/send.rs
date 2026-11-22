@@ -285,7 +285,14 @@ fn send_prepared_packets(
         if let Some(spread) = smooth_spread
             && sent > 0
         {
-            wait_until(burst_started_at + spread.mul_f64(sent as f64 / total as f64));
+            // A plain sleep, not `wait_until`: only the spacing matters here, and spinning on every
+            // packet of every frame cost ~10 points of CPU at 5-9 Mbps on the 1 vCPU VPS. The
+            // targets are absolute, so an oversleep is not carried over to the next packet.
+            let target = burst_started_at + spread.mul_f64(sent as f64 / total as f64);
+            let now = Instant::now();
+            if target > now {
+                std::thread::sleep(target - now);
+            }
         }
 
         sink.send_packet(packet.as_slice())?;

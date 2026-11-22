@@ -53,6 +53,21 @@ impl FakeExternalSender {
             .tls_serialize_detached()
             .unwrap()
     }
+
+    /// Payload of an append op 27 (after the optype byte): proposes removing the member at `leaf_index`.
+    pub fn propose_remove(&self, epoch: u64, leaf_index: u32) -> Vec<u8> {
+        let message = ExternalProposal::new_remove::<OpenMlsRustCrypto>(
+            LeafNodeIndex::new(leaf_index),
+            self.group_id.clone(),
+            GroupEpoch::from(epoch),
+            &self.signer,
+            SenderExtensionIndex::new(0),
+        )
+        .unwrap();
+        VLBytes::new(message.tls_serialize_detached().unwrap())
+            .tls_serialize_detached()
+            .unwrap()
+    }
 }
 
 /// Splits an op 28 payload (`commit` then optional `welcome`) at the end of the commit message.

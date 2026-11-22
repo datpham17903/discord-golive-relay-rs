@@ -295,6 +295,7 @@ impl Probe {
             ClientEvent::DaveTransition {
                 stream_key,
                 transition_id,
+                ..
             } => {
                 self.log(
                     "dave_transition",

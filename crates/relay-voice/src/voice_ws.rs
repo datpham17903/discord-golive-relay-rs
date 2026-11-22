@@ -445,7 +445,10 @@ pub enum VoiceEvent {
     DaveError(String),
     /// op 22 switched the DAVE key to a new group (transition id > 0): receivers that just joined
     /// can only decrypt media sent from now on.
-    DaveTransition(u16),
+    DaveTransition {
+        transition_id: u16,
+        members_added: bool,
+    },
     /// The socket ended; the task is gone. `code` is the close code when there was one.
     Closed {
         code: Option<u16>,
@@ -1214,9 +1217,12 @@ impl Task {
             },
             op::DAVE_EXECUTE_TRANSITION => {
                 match uint("transition_id").and_then(|v| u16::try_from(v).ok()) {
-                    Some(id) => self.dave.on_execute_transition(id).map(|()| {
+                    Some(id) => self.dave.on_execute_transition(id).map(|members_added| {
                         if id > 0 {
-                            self.emit(VoiceEvent::DaveTransition(id));
+                            self.emit(VoiceEvent::DaveTransition {
+                                transition_id: id,
+                                members_added,
+                            });
                         }
                         Vec::new()
                     }),

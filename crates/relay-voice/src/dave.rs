@@ -14,7 +14,7 @@
 //! never decrypt ("packets arrive, no frame assembles"). This port calls them, like libdave.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU16;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -115,6 +115,8 @@ struct Inner {
     downgraded: bool,
     /// The last transition id seen in op 21, 29 or 30 (0 before any).
     last_transition: u16,
+    /// Group members (without us) the current key was shared with.
+    roster: HashSet<u64>,
 }
 
 /// Read-only view of the session, for probes and status output.
@@ -148,6 +150,7 @@ impl Dave {
                 pending: HashMap::new(),
                 downgraded: false,
                 last_transition: 0,
+                roster: HashSet::new(),
             }),
             decrypt_failures: AtomicU64::new(0),
         }
@@ -256,10 +259,13 @@ impl Dave {
     }
 
     /// op 22 DAVE_EXECUTE_TRANSITION.
-    pub fn on_execute_transition(&self, transition_id: u16) -> Result<(), DaveError> {
+    ///
+    /// Returns whether an executed transition shared the key with a member the previous key did not
+    /// reach (`false` when nothing was executed).
+    pub fn on_execute_transition(&self, transition_id: u16) -> Result<bool, DaveError> {
         let mut inner = self.inner.lock();
         if inner.session.is_none() {
-            return Ok(());
+            return Ok(false);
         }
         inner.execute_transition(transition_id)
     }
@@ -477,20 +483,39 @@ impl Inner {
             .prepare_transition(transition_id, version)
             .map_err(session_err)?;
         if transition_id == 0 {
+            self.update_roster();
             return Ok(Vec::new());
         }
         self.pending.insert(transition_id, version);
         Ok(vec![DaveOut::TransitionReady(transition_id)])
     }
 
-    /// `_execute_transition`.
-    fn execute_transition(&mut self, transition_id: u16) -> Result<(), DaveError> {
-        let Some(new_version) = self.pending.remove(&transition_id) else {
-            return Ok(());
+    /// Records the group members the key now in use is shared with; whether any is new.
+    fn update_roster(&mut self) -> bool {
+        let user_id = self.user_id;
+        let roster = self.session_mut().get_user_ids().map(|ids| {
+            ids.into_iter()
+                .filter(|id| *id != user_id)
+                .collect::<HashSet<u64>>()
+        });
+        let added = match &roster {
+            None => true,
+            Some(roster) => !roster.is_subset(&self.roster),
         };
-        self.session_mut()
+        self.roster = roster.unwrap_or_default();
+        added
+    }
+
+    /// `_execute_transition`.
+    fn execute_transition(&mut self, transition_id: u16) -> Result<bool, DaveError> {
+        let Some(new_version) = self.pending.remove(&transition_id) else {
+            return Ok(false);
+        };
+        let executed = self
+            .session_mut()
             .execute_transition(transition_id)
             .map_err(session_err)?;
+        let members_added = executed && self.update_roster();
         let old_version = std::mem::replace(&mut self.protocol_version, new_version);
         if old_version != new_version && new_version == 0 {
             self.downgraded = true;
@@ -499,7 +524,7 @@ impl Inner {
             self.session_mut()
                 .set_passthrough_mode(true, Some(PASSTHROUGH_EXPIRY));
         }
-        Ok(())
+        Ok(members_added || (executed && new_version == 0))
     }
 }
 

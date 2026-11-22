@@ -854,10 +854,13 @@ async fn dave_text_ops_prepare_epoch_and_downgrade() {
     assert!(matches!(
         events_until(&mut h.events, |e| matches!(
             e,
-            VoiceEvent::DaveTransition(_)
+            VoiceEvent::DaveTransition { .. }
         ))
         .await,
-        VoiceEvent::DaveTransition(4)
+        VoiceEvent::DaveTransition {
+            transition_id: 4,
+            members_added: true
+        }
     ));
 }
 

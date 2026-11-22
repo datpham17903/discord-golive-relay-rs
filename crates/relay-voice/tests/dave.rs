@@ -177,16 +177,18 @@ fn late_joining_viewer_decrypts_once_the_sender_executes_the_transition() {
     assert!(err.is_retryable(), "{err}");
 
     // op 22 on the sender is enough: C installed A's epoch-2 key when it prepared the welcome.
-    a.on_execute_transition(8).unwrap();
+    assert!(
+        a.on_execute_transition(8).unwrap(),
+        "adding C reports members_added"
+    );
     let new = a
         .encrypt_video(VoiceCodec::VP8, &frame)
         .unwrap()
         .into_owned();
     assert_eq!(c.decrypt(USER_A, DaveMedia::Video, &new).unwrap(), frame);
     assert_eq!(b.decrypt(USER_A, DaveMedia::Video, &new).unwrap(), frame);
-    for d in [&b, &c] {
-        d.on_execute_transition(8).unwrap();
-    }
+    assert!(b.on_execute_transition(8).unwrap());
+    assert!(c.on_execute_transition(8).unwrap());
     let sealed = c.encrypt_opus(&[0x78, 1, 2, 3, 4, 5]).unwrap().into_owned();
     assert_eq!(
         a.decrypt(USER_C, DaveMedia::Audio, &sealed).unwrap(),
@@ -197,6 +199,32 @@ fn late_joining_viewer_decrypts_once_the_sender_executes_the_transition() {
     assert!(c.decrypt(USER_A, DaveMedia::Video, &old).is_err());
     assert_eq!(c.decrypt_failures(), 2);
     assert_eq!(b.decrypt_failures(), 0);
+}
+
+/// Removing a member leaves the remaining members' key with everyone who already had it.
+#[test]
+fn removal_only_transition_reports_no_members_added() {
+    let (gateway, a, b) = establish_with_gateway(7);
+    // A is leaf 0, B leaf 1.
+    let mut proposals = vec![0u8]; // append
+    proposals.extend_from_slice(&gateway.propose_remove(1, 1));
+    let outs = a.on_binary(op::MLS_PROPOSALS, &proposals).unwrap();
+    let [DaveOut::CommitWelcome(payload)] = outs.as_slice() else {
+        panic!("expected commit+welcome, got {outs:?}");
+    };
+    let (commit, _) = split_commit_welcome(payload);
+    assert_eq!(
+        a.on_binary(
+            op::MLS_ANNOUNCE_COMMIT_TRANSITION,
+            &with_transition(8, &commit)
+        )
+        .unwrap(),
+        vec![DaveOut::TransitionReady(8)]
+    );
+    assert!(!a.on_execute_transition(8).unwrap());
+    // Nothing is pending any more.
+    assert!(!a.on_execute_transition(8).unwrap());
+    drop(b);
 }
 
 #[test]
@@ -254,7 +282,10 @@ fn downgrade_enables_passthrough_then_stops_encrypting() {
         b.can_encrypt(),
         "still encrypting until the transition executes"
     );
-    b.on_execute_transition(9).unwrap();
+    assert!(
+        b.on_execute_transition(9).unwrap(),
+        "a downgrade reports members_added"
+    );
     assert_eq!(b.protocol_version(), 0);
     assert!(!b.can_encrypt());
 

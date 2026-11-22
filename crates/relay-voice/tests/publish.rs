@@ -1153,6 +1153,145 @@ async fn test_viewer_pli_and_fir_reach_the_callback_and_other_ssrcs_do_not() {
     stream.disconnect().await;
 }
 
+/// A published DAVE stream playing, with a counter on the keyframe requests that reach the owner.
+async fn dave_stream_with_pli_counter() -> (Rig, StreamClient, Arc<AtomicUsize>) {
+    let rig = rig(RtcCfg::stream("H264", Some(DaveFake::new()))).await;
+    let stream = create(&rig).await;
+    let connection = stream.connection().unwrap();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !connection.dave().can_encrypt() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "DAVE never became active"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let count = Arc::new(AtomicUsize::new(0));
+    let count2 = Arc::clone(&count);
+    stream.on_keyframe_request(move || {
+        count2.fetch_add(1, Ordering::SeqCst);
+    });
+    let mut tap = Tap::new(&rig.stream_rtc);
+    stream.play(h264_source(), params()).unwrap();
+    tap.wait("some video", |w| !video_packets(w, VIDEO_SSRC).is_empty())
+        .await;
+    // the sender asks once itself when it drops a frame while starting; count from after that
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    count.store(0, Ordering::SeqCst);
+    (rig, stream, count)
+}
+
+fn viewer_pli(rig: &Rig) {
+    let (header, body) = rtcp::pli(VIEWER_SSRC, VIDEO_SSRC);
+    let packet = crypto().encrypt_rtcp(&header, &body).unwrap();
+    rig.stream_rtc.udp.send(&[packet]);
+}
+
+fn server_send(rig: &Rig, op: u64, d: Value) {
+    let _ = rig
+        .stream_rtc
+        .ctl
+        .send(Ctl::Send(json!({"op": op, "d": d})));
+}
+
+/// op 21 then op 22 for `transition_id`; the DaveTransition event it produces.
+async fn dave_transition(rig: &mut Rig, transition_id: u16, version: u16) -> (bool, bool) {
+    server_send(
+        rig,
+        21,
+        json!({"transition_id": transition_id, "protocol_version": version}),
+    );
+    server_send(rig, 22, json!({"transition_id": transition_id}));
+    loop {
+        match timeout(WAIT, rig.events.recv()).await.unwrap().unwrap() {
+            ClientEvent::DaveTransition {
+                transition_id: id,
+                members_added,
+                keyframe_requested,
+                ..
+            } if id == transition_id => return (members_added, keyframe_requested),
+            _ => {}
+        }
+    }
+}
+
+async fn viewer_pli_inside_the_hold_window_waits_for_the_key_switch() {
+    let (mut rig, stream, count) = dave_stream_with_pli_counter().await;
+    // no window: forwarded at once
+    viewer_pli(&rig);
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while count.load(Ordering::SeqCst) < 1 {
+        assert!(tokio::time::Instant::now() < deadline, "PLI never arrived");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    server_send(&rig, 11, json!({"user_ids": [VIEWER.to_string()]}));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    viewer_pli(&rig);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(count.load(Ordering::SeqCst), 1, "held PLI leaked");
+
+    // the key switch only re-keys the same members, but a viewer asked meanwhile
+    let (members_added, requested) = dave_transition(&mut rig, 5, 1).await;
+    assert!(!members_added && requested);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    // the window is closed: PLIs go through again
+    viewer_pli(&rig);
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while count.load(Ordering::SeqCst) < 3 {
+        assert!(tokio::time::Instant::now() < deadline, "PLI never arrived");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    stream.disconnect().await;
+}
+
+async fn removal_only_key_switch_requests_no_keyframe() {
+    let (mut rig, stream, count) = dave_stream_with_pli_counter().await;
+    let (members_added, requested) = dave_transition(&mut rig, 5, 1).await;
+    assert!(!members_added && !requested);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    stream.disconnect().await;
+}
+
+async fn key_switch_adding_members_requests_a_keyframe() {
+    let (mut rig, stream, count) = dave_stream_with_pli_counter().await;
+    // a downgrade drops the group: reported as members added
+    let (members_added, requested) = dave_transition(&mut rig, 5, 0).await;
+    assert!(members_added && requested);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    stream.disconnect().await;
+}
+
+async fn held_viewer_pli_is_forwarded_when_the_window_expires() {
+    let (rig, stream, count) = dave_stream_with_pli_counter().await;
+    server_send(&rig, 11, json!({"user_ids": [VIEWER.to_string()]}));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    viewer_pli(&rig);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while count.load(Ordering::SeqCst) < 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "held PLI never forwarded"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    stream.disconnect().await;
+}
+
+/// One test, so the DAVE rigs do not run side by side and starve the timing-sensitive tests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_viewer_pli_hold_follows_the_dave_key_switch() {
+    viewer_pli_inside_the_hold_window_waits_for_the_key_switch().await;
+    removal_only_key_switch_requests_no_keyframe().await;
+    key_switch_adding_members_requests_a_keyframe().await;
+    held_viewer_pli_is_forwarded_when_the_window_expires().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_viewer_nack_is_answered_with_an_rtx_packet() {
     let rig = rig(RtcCfg::stream("H264", None)).await;

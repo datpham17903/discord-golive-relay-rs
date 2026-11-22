@@ -1435,6 +1435,66 @@ service_test!(
     }
 );
 
+service_test!(
+    test_keyframe_event_cancels_the_deferred_feedback_idr,
+    async {
+        let env = env(Setup::default());
+        let task = env.reach_relaying().await;
+        let w = env.worker(0);
+        let force = || {
+            w.sent
+                .lock()
+                .iter()
+                .filter(|m| matches!(m, Ingress::ForceIdr(_)))
+                .count()
+        };
+        env.svc
+            .dispatch(AdapterEvent::Pool(PoolEvent::OutPli { account: None }));
+        env.svc
+            .dispatch(AdapterEvent::Pool(PoolEvent::OutPli { account: None }));
+        assert_eq!(force(), 1);
+        assert!(env.svc.idr_timer_pending());
+        let (g, e) = env.svc.with_sup(|s| (s.generation(), s.epoch()));
+        env.svc.on_worker_event(WorkerEvent {
+            generation: g,
+            epoch: e,
+            kind: WorkerEventKind::Keyframe,
+            data: Map::new(),
+        });
+        assert!(!env.svc.idr_timer_pending());
+        sleep(0.2).await;
+        assert_eq!(force(), 1);
+        env.shutdown(task).await;
+    }
+);
+
+service_test!(
+    test_keyframe_event_cancels_the_deferred_upstream_pli,
+    async {
+        let env = env(Setup {
+            pli_min_interval_s: Some(0.3),
+            ..Setup::default()
+        });
+        let task = env.start();
+        wait_until(|| env.adapter_started(0)).await;
+        let a = env.adapter(0);
+        env.svc.request_pli();
+        env.svc.request_pli();
+        assert!(env.svc.pli_timer_pending());
+        let (g, e) = env.svc.with_sup(|s| (s.generation(), s.epoch()));
+        env.svc.on_worker_event(WorkerEvent {
+            generation: g,
+            epoch: e,
+            kind: WorkerEventKind::Keyframe,
+            data: Map::new(),
+        });
+        assert!(!env.svc.pli_timer_pending());
+        sleep(0.5).await;
+        assert_eq!(a.count("pli"), 1);
+        env.shutdown(task).await;
+    }
+);
+
 service_test!(test_mandatory_idr_not_rate_limited_by_feedback, async {
     let env = env(Setup::default());
     let task = env.reach_relaying().await;

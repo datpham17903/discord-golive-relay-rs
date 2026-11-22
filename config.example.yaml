@@ -52,7 +52,7 @@ runtime:
   retry_delays_seconds: [1, 2, 4, 8, 15]
   retry_cooldown_seconds: 60
   keyframe_interval_seconds: 2
-  feedback_idr_min_interval_ms: 500
+  feedback_idr_min_interval_ms: 1000   # a keyframe request inside the interval is deferred, not dropped
   repeated_rejection_limit: 3
   recording_enabled: false
   prejoin_voice: true         # the ingest joins the main channel while the target is there, before it streams

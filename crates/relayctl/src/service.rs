@@ -3784,8 +3784,13 @@ impl Service {
             WorkerEventKind::Keyframe => {
                 let now = monotonic();
                 let ms = |t: Option<f64>| t.map(|t| ((now - t) * 1000.0).round());
+                // This keyframe serves whoever asked meanwhile: drop the deferred IDR and PLI.
+                Self::cancel_pli_timer(c);
                 let (viewer_plis, first_viewer) = {
                     let mut h = self.hot.lock();
+                    if let Some(t) = h.idr_timer.take() {
+                        t.abort();
+                    }
                     (
                         std::mem::take(&mut h.viewer_plis),
                         h.first_viewer_pli.take(),
@@ -4455,6 +4460,11 @@ impl Service {
     #[doc(hidden)]
     pub fn pli_timer_pending(&self) -> bool {
         self.core.lock().pli_timer.is_some()
+    }
+
+    #[doc(hidden)]
+    pub fn idr_timer_pending(&self) -> bool {
+        self.hot.lock().idr_timer.is_some()
     }
 
     #[doc(hidden)]

@@ -100,12 +100,24 @@ struct StreamState {
     pli: Option<PliHandler>,
 }
 
+/// How long viewer PLIs are held after a client joined, waiting for the key switch that adds it.
+const PLI_HOLD: Duration = Duration::from_millis(1500);
+
+/// A joining viewer's PLI is answered by a keyframe it cannot decrypt yet; while the window is open
+/// PLIs are only recorded and the keyframe is requested once, on the key switch.
+#[derive(Default)]
+struct PliHold {
+    until: Option<Instant>,
+    held: bool,
+}
+
 pub(crate) struct StreamInner {
     key: String,
     vc: Weak<VcInner>,
     gateway: Arc<dyn GatewayLink>,
     settings: RtcSettings,
     state: Mutex<StreamState>,
+    hold: Arc<Mutex<PliHold>>,
     generation: AtomicU64,
     /// We created this stream (so we can publish on it).
     own: bool,
@@ -173,6 +185,7 @@ impl StreamInner {
                 sender: None,
                 pli: None,
             }),
+            hold: Arc::default(),
             generation: AtomicU64::new(0),
             own: matches!(how, Open::Create(_)),
         });
@@ -285,17 +298,41 @@ impl StreamInner {
                     stream_key: stream_key.clone(),
                     error,
                 }),
-                ConnEvent::Message { .. } => {}
-                ConnEvent::DaveTransition(transition_id) => {
+                ConnEvent::Message { op, .. } => {
+                    let dave_in_use = self
+                        .state
+                        .lock()
+                        .dave
+                        .as_ref()
+                        .is_some_and(|dave| dave.protocol_version() > 0);
+                    if op == crate::voice_ws::op::CLIENTS_CONNECT && self.own && dave_in_use {
+                        self.open_hold();
+                    }
+                }
+                ConnEvent::DaveTransition {
+                    transition_id,
+                    members_added,
+                } => {
                     // A keyframe sent before the switch is undecryptable for a viewer who just
                     // joined: without a fresh one it stays black until the source's next keyframe.
+                    // After a removal the remaining viewers already have the key.
                     let pli = self.state.lock().pli.clone();
                     if let Some(pli) = pli {
+                        let held = {
+                            let mut hold = self.hold.lock();
+                            hold.until = None;
+                            std::mem::take(&mut hold.held)
+                        };
+                        let keyframe_requested = members_added || held;
                         vc.emit(ClientEvent::DaveTransition {
                             stream_key: self.key.clone(),
                             transition_id,
+                            members_added,
+                            keyframe_requested,
                         });
-                        pli();
+                        if keyframe_requested {
+                            pli();
+                        }
                     }
                 }
                 ConnEvent::Resumed => vc.emit(ClientEvent::Reconnected {
@@ -321,6 +358,45 @@ impl StreamInner {
                 }
             }
         }
+    }
+
+    /// Opens (or extends) the PLI hold window; a held PLI still goes out when it expires.
+    fn open_hold(self: &Arc<Self>) {
+        let until = Instant::now() + PLI_HOLD;
+        self.hold.lock().until = Some(until);
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep_until(until).await;
+            let held = {
+                let mut hold = this.hold.lock();
+                if hold.until != Some(until) {
+                    return;
+                }
+                hold.until = None;
+                std::mem::take(&mut hold.held)
+            };
+            if held {
+                let pli = this.state.lock().pli.clone();
+                if let Some(pli) = pli {
+                    pli();
+                }
+            }
+        });
+    }
+
+    /// The handler given to the sender: holds viewer PLIs while the window is open.
+    fn gated(&self, owner: PliHandler) -> PliHandler {
+        let hold = Arc::clone(&self.hold);
+        Arc::new(move || {
+            {
+                let mut hold = hold.lock();
+                if hold.until.is_some_and(|until| Instant::now() < until) {
+                    hold.held = true;
+                    return;
+                }
+            }
+            owner();
+        })
     }
 
     /// `_potential_reconnect` after a 4014 / 4022 close: the next STREAM_SERVER_UPDATE reconnects;
@@ -695,7 +771,7 @@ impl StreamClient {
         let handler: PliHandler = Arc::new(handler);
         let mut st = self.inner.state.lock();
         if let Some(sender) = &st.sender {
-            sender.set_pli_handler(Some(Arc::clone(&handler)));
+            sender.set_pli_handler(Some(self.inner.gated(Arc::clone(&handler))));
         }
         st.pli = Some(handler);
     }
@@ -782,7 +858,7 @@ impl StreamClient {
             settings.receive.codecs.clone(),
             settings.receive.rtx_enabled,
             settings.send,
-            st.pli.clone(),
+            st.pli.clone().map(|owner| self.inner.gated(owner)),
         );
         st.sender = Some(Arc::clone(&sender));
         Ok(sender)

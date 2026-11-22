@@ -556,6 +556,7 @@ impl VoiceWs {
                 }
                 DaveOut::KeyPackage(data) => self.send_binary(op::MLS_KEY_PACKAGE, data)?,
                 DaveOut::CommitWelcome(data) => self.send_binary(op::MLS_COMMIT_WELCOME, data)?,
+                DaveOut::Executed { .. } => {}
             }
         }
         Ok(())
@@ -714,8 +715,8 @@ fn binary_frame(op: u8, data: &[u8]) -> Message {
     Message::binary(frame)
 }
 
-fn dave_frame(out: &DaveOut) -> Message {
-    match out {
+fn dave_frame(out: &DaveOut) -> Option<Message> {
+    Some(match out {
         DaveOut::TransitionReady(id) => {
             json_frame(op::DAVE_TRANSITION_READY, json!({"transition_id": id}))
         }
@@ -724,7 +725,8 @@ fn dave_frame(out: &DaveOut) -> Message {
         }
         DaveOut::KeyPackage(data) => binary_frame(op::MLS_KEY_PACKAGE, data),
         DaveOut::CommitWelcome(data) => binary_frame(op::MLS_COMMIT_WELCOME, data),
-    }
+        DaveOut::Executed { .. } => return None,
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1035,7 +1037,15 @@ impl Task {
 
     async fn send_dave(&mut self, outs: Vec<DaveOut>) -> Option<Exit> {
         for out in &outs {
-            if let Some(exit) = self.send(dave_frame(out)).await {
+            if let DaveOut::Executed { members_added } = out {
+                self.emit(VoiceEvent::DaveTransition {
+                    transition_id: 0,
+                    members_added: *members_added,
+                });
+            }
+            if let Some(frame) = dave_frame(out)
+                && let Some(exit) = self.send(frame).await
+            {
                 return Some(exit);
             }
         }

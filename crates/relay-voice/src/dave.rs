@@ -102,6 +102,8 @@ pub enum DaveOut {
     CommitWelcome(Vec<u8>),
     /// op 31 `{"transition_id"}`.
     InvalidCommitWelcome(u16),
+    /// A transition applied at once (id 0, no op 22 follows); nothing is sent.
+    Executed { members_added: bool },
 }
 
 struct Inner {
@@ -247,8 +249,8 @@ impl Dave {
             .map_err(session_err)?;
         inner.pending.insert(transition_id, protocol_version);
         if transition_id == 0 {
-            inner.execute_transition(transition_id)?;
-            return Ok(Vec::new());
+            let members_added = inner.execute_transition(transition_id)?;
+            return Ok(vec![DaveOut::Executed { members_added }]);
         }
         if protocol_version == 0
             && let Some(session) = inner.session.as_mut()
@@ -483,8 +485,8 @@ impl Inner {
             .prepare_transition(transition_id, version)
             .map_err(session_err)?;
         if transition_id == 0 {
-            self.update_roster();
-            return Ok(Vec::new());
+            let members_added = self.update_roster();
+            return Ok(vec![DaveOut::Executed { members_added }]);
         }
         self.pending.insert(transition_id, version);
         Ok(vec![DaveOut::TransitionReady(transition_id)])

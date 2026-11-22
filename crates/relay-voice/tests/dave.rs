@@ -66,7 +66,13 @@ fn establish_with_gateway(transition_id: u16) -> (FakeExternalSender, Dave, Dave
     // The gateway announces the commit to A and sends the welcome to B.
     let ready = |outs: Vec<DaveOut>| {
         if transition_id == 0 {
-            assert!(outs.is_empty());
+            // applied at once: reported as executed, the key now covers the other member
+            assert_eq!(
+                outs,
+                vec![DaveOut::Executed {
+                    members_added: true
+                }]
+            );
         } else {
             assert_eq!(outs, vec![DaveOut::TransitionReady(transition_id)]);
         }

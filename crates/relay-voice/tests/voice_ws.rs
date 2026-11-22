@@ -717,6 +717,51 @@ async fn silent_socket_is_closed_after_the_heartbeat_timeout() {
 }
 
 #[tokio::test]
+async fn transition_zero_is_reported_without_an_op_22() {
+    let sender = FakeExternalSender::new(CHANNEL_ID);
+    let peer = Dave::new(777, CHANNEL_ID);
+    let mut h = start(|_| {}).await;
+    let _identify = h.server.recv_json().await;
+    h.server.hello(60_000).await;
+    h.server.ready().await;
+    assert_eq!(h.server.recv_json().await["op"], 16);
+    h.server.send(session_description(1)).await;
+    assert_eq!(h.server.recv_json().await["op"], 5);
+    let _kp = h.server.recv_binary().await;
+    let peer_kp = match peer.on_session_description(1).unwrap().as_slice() {
+        [relay_voice::dave::DaveOut::KeyPackage(kp)] => kp.clone(),
+        other => panic!("{other:?}"),
+    };
+    peer.on_binary(op::MLS_EXTERNAL_SENDER, &sender.marshalled())
+        .unwrap();
+    h.server
+        .send_binary(1, op::MLS_EXTERNAL_SENDER, &sender.marshalled())
+        .await;
+    let mut proposals = vec![0u8];
+    proposals.extend_from_slice(&sender.propose_add(0, &peer_kp));
+    h.server.send_binary(2, op::MLS_PROPOSALS, &proposals).await;
+    let cw = h.server.recv_binary().await;
+    let (commit, _welcome) = split_commit_welcome(&cw[1..]);
+    let mut announce = 0u16.to_be_bytes().to_vec();
+    announce.extend_from_slice(&commit);
+    h.server
+        .send_binary(3, op::MLS_ANNOUNCE_COMMIT_TRANSITION, &announce)
+        .await;
+    assert!(matches!(
+        events_until(&mut h.events, |e| matches!(
+            e,
+            VoiceEvent::DaveTransition { .. }
+        ))
+        .await,
+        VoiceEvent::DaveTransition {
+            transition_id: 0,
+            members_added: true
+        }
+    ));
+    assert!(h.dave.can_encrypt());
+}
+
+#[tokio::test]
 async fn dave_ops_round_trip_over_the_socket() {
     let sender = FakeExternalSender::new(CHANNEL_ID);
     let peer_id = 777u64;

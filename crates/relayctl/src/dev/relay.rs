@@ -668,6 +668,8 @@ impl Relay {
                     "audio_held_reads": window.audio_held_reads,
                     "audio_late_dropped": window.audio_late_dropped,
                     "audio_evicted": window.audio_evicted,
+                    "audio_gaps": window.audio_gaps,
+                    "audio_skipped": window.audio_skipped,
                 },
             }),
         );

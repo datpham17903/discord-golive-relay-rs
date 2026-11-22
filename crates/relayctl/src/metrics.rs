@@ -206,7 +206,7 @@ fn numeric_fields(obj: Option<&Value>) -> Vec<(String, String)> {
 }
 
 /// Per-account fields that are counts of the last status interval (the send window).
-const ACCOUNT_SEND_FIELDS: [&str; 7] = [
+const ACCOUNT_SEND_FIELDS: [&str; 9] = [
     "sent",
     "stalls",
     "max_send_gap_ms",
@@ -214,6 +214,8 @@ const ACCOUNT_SEND_FIELDS: [&str; 7] = [
     "audio_held_reads",
     "audio_late_dropped",
     "audio_evicted",
+    "audio_gaps",
+    "audio_skipped",
 ];
 
 /// Prometheus text for the last `status.json` (`None` before the first write), `age_s` seconds old.

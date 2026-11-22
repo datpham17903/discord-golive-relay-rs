@@ -121,6 +121,11 @@ impl VP8Packetizer {
         self.state.timestamp()
     }
 
+    /// The RTP timestamp of the next frame.
+    pub fn set_timestamp(&self, timestamp: u32) {
+        self.state.set_timestamp(timestamp);
+    }
+
     fn make_payload(&self, chunk: &[u8], first: bool) -> Vec<u8> {
         let picture_id = self.picture_id.get() & 0x7FFF;
         let mut payload = Vec::with_capacity(4 + chunk.len());

@@ -172,6 +172,11 @@ impl PacketizerState {
         self.timestamp.get()
     }
 
+    pub(super) fn set_timestamp(&self, timestamp: u32) {
+        self.timestamp.set(timestamp);
+        self.timestamp_remainder.set(0.0);
+    }
+
     fn next_sequence(&self) -> u16 {
         let next = self.sequence.get().wrapping_add(1);
         self.sequence.set(next);

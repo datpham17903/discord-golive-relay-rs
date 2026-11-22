@@ -241,6 +241,11 @@ impl AV1Packetizer {
         self.state.timestamp()
     }
 
+    /// The RTP timestamp of the next frame.
+    pub fn set_timestamp(&self, timestamp: u32) {
+        self.state.set_timestamp(timestamp);
+    }
+
     fn payload_limits(&self) -> Result<AV1PayloadSizeLimits, PacketError> {
         let max_payload_len = self.state.mtu();
         if max_payload_len.saturating_sub(AGGREGATION_HEADER_SIZE) < 3 {

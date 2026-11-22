@@ -53,6 +53,10 @@ const AUDIO_CLOCK_RATE: u64 = 48_000;
 const SILENCE_PACKET_COUNT: usize = 10;
 /// `RelayMediaSource.video_retry_delay`.
 const VIDEO_RETRY: Duration = Duration::from_millis(2);
+/// The RTP clock rate of every video codec.
+const VIDEO_CLOCK_HZ: f64 = 90_000.0;
+/// Video sender reports go out about once a second, like the audio ones.
+const SENDER_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 /// Retry when the video transport is not started (`MediaPlayer`: `+ 0.02`).
 const VIDEO_NOT_READY_RETRY: Duration = Duration::from_millis(20);
 /// The longest the loop sleeps in one go.
@@ -118,9 +122,12 @@ fn add(counter: &AtomicU64, n: u64) {
 struct VideoStream {
     codec: VoiceCodec,
     ssrc: u32,
-    /// Seconds of media sent, for the once-per-second sender report (`_video_media_times_ms`).
-    media_time_ms: f64,
-    last_rtcp_media_ms: f64,
+    /// Send instant and RTP timestamp of the first frame; later frames are stamped from the wall
+    /// clock since then (see [`video_timestamp`]).
+    clock: Option<(Instant, u32)>,
+    last_timestamp: Option<u32>,
+    /// When the last sender report went out (one per [`SENDER_REPORT_INTERVAL`]).
+    last_report: Option<Instant>,
     packet_count: u32,
     octet_count: u32,
 }
@@ -387,8 +394,9 @@ impl Sender {
         active.video = Some(VideoStream {
             codec,
             ssrc,
-            media_time_ms: 0.0,
-            last_rtcp_media_ms: -1.0,
+            clock: None,
+            last_timestamp: None,
+            last_report: None,
             packet_count: 0,
             octet_count: 0,
         });
@@ -660,6 +668,20 @@ impl Sender {
         };
         let udp = conn.udp();
         let metadata = (codec == VoiceCodec::VP9).then_some(original.as_slice());
+        // Stamped from the wall clock, like the audio cadence. Per-frame increments stood still
+        // while no frame went out (a source stall, a growing jitter buffer), so the video clock
+        // fell behind the audio one for good and viewers drifted out of sync until they rejoined.
+        let now = Instant::now();
+        let clock = *video.clock.get_or_insert_with(|| {
+            (
+                now,
+                self.pipeline.current_timestamp(video.ssrc).unwrap_or(0),
+            )
+        });
+        let _ = self.pipeline.set_timestamp(
+            video.ssrc,
+            video_timestamp(clock, now, video.last_timestamp),
+        );
         let sent = self.pipeline.send_video_frame(
             conn.crypto_tx(),
             &**udp as &dyn PacketSink,
@@ -678,21 +700,24 @@ impl Sender {
                 add(&self.counters.video_octets, summary.octets as u64);
                 video.packet_count = video.packet_count.wrapping_add(summary.sent as u32);
                 video.octet_count = video.octet_count.wrapping_add(summary.octets as u32);
-                // `_maybe_send_video_rtcp_sender_report`: media time before this frame
+                video.last_timestamp = Some(summary.rtp_timestamp);
+                // `_maybe_send_video_rtcp_sender_report`, on the wall clock: the report pairs the
+                // NTP time it is sent at with the RTP clock at that instant
                 if summary.sent > 0
-                    && (video.media_time_ms / 1000.0).floor()
-                        > (video.last_rtcp_media_ms / 1000.0).floor()
+                    && video
+                        .last_report
+                        .is_none_or(|t| now.saturating_duration_since(t) >= SENDER_REPORT_INTERVAL)
                 {
+                    let report_timestamp = video_timestamp(clock, Instant::now(), None);
                     self.send_sender_report(
                         &conn,
                         video.ssrc,
-                        summary.rtp_timestamp,
+                        report_timestamp,
                         video.packet_count,
                         video.octet_count,
                     );
-                    video.last_rtcp_media_ms = video.media_time_ms;
+                    video.last_report = Some(now);
                 }
-                video.media_time_ms += frame_time_ms;
             }
             Err(_) => add(&self.counters.send_errors, 1),
         }
@@ -732,6 +757,17 @@ enum VideoTick {
     Idle,
     /// Video is not started (no codec or SSRC yet).
     NotReady,
+}
+
+/// RTP timestamp (90 kHz) of a frame sent at `now`: the timestamp of `clock`'s instant plus the
+/// wall-clock time since, strictly after `last` so two frames never share one.
+fn video_timestamp(clock: (Instant, u32), now: Instant, last: Option<u32>) -> u32 {
+    let ticks = (now.saturating_duration_since(clock.0).as_secs_f64() * VIDEO_CLOCK_HZ).round();
+    let timestamp = clock.1.wrapping_add(ticks as u64 as u32);
+    match last {
+        Some(last) if (timestamp.wrapping_sub(last) as i32) <= 0 => last.wrapping_add(1),
+        _ => timestamp,
+    }
 }
 
 /// `MediaPlayer._next_video_time` for a non-realtime source: the next slot, or now when more than a
@@ -810,6 +846,18 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn video_timestamp_follows_the_clock_and_never_repeats() {
+        let t0 = Instant::now();
+        let clock = (t0, u32::MAX - 1000);
+        let later = t0 + Duration::from_millis(500);
+        // 500 ms on 90 kHz, across the 32-bit wrap
+        assert_eq!(video_timestamp(clock, later, None), 45_000 - 1001);
+        // two frames at the same instant, or a clock that went back: one tick after the last
+        assert_eq!(video_timestamp(clock, t0, Some(clock.1)), clock.1 + 1);
+        assert_eq!(video_timestamp(clock, t0, Some(5)), 6);
+    }
 
     #[test]
     fn bitrate_follows_resolution_and_fps() {

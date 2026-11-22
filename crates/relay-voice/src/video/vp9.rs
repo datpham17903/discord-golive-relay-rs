@@ -140,6 +140,11 @@ impl VP9Packetizer {
         self.state.timestamp()
     }
 
+    /// The RTP timestamp of the next frame.
+    pub fn set_timestamp(&self, timestamp: u32) {
+        self.state.set_timestamp(timestamp);
+    }
+
     fn frame_info(frame: &[u8]) -> VP9FrameInfo {
         let mut reader = BitReader {
             data: frame,

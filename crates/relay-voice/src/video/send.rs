@@ -74,6 +74,16 @@ impl PipelinePacketizer {
             Self::VP9(packetizer) => packetizer.timestamp(),
         }
     }
+
+    fn set_timestamp(&self, timestamp: u32) {
+        match self {
+            Self::AV1(packetizer) => packetizer.set_timestamp(timestamp),
+            Self::H264(packetizer) => packetizer.set_timestamp(timestamp),
+            Self::H265(packetizer) => packetizer.set_timestamp(timestamp),
+            Self::VP8(packetizer) => packetizer.set_timestamp(timestamp),
+            Self::VP9(packetizer) => packetizer.set_timestamp(timestamp),
+        }
+    }
 }
 
 struct SentVideoPacket {
@@ -389,6 +399,15 @@ impl VideoSendPipeline {
             .streams
             .get(&media_ssrc)
             .map(|stream| stream.packetizer.timestamp())
+            .ok_or_else(|| SendError::Value(format!("Unknown video stream SSRC: {media_ssrc}")))
+    }
+
+    /// Sets the RTP timestamp the next frame of `media_ssrc` is sent with.
+    pub fn set_timestamp(&self, media_ssrc: u32, timestamp: u32) -> Result<(), SendError> {
+        lock_state(&self.inner)?
+            .streams
+            .get(&media_ssrc)
+            .map(|stream| stream.packetizer.set_timestamp(timestamp))
             .ok_or_else(|| SendError::Value(format!("Unknown video stream SSRC: {media_ssrc}")))
     }
 

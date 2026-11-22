@@ -141,6 +141,11 @@ impl H265Packetizer {
     pub fn timestamp(&self) -> u32 {
         self.state.timestamp()
     }
+
+    /// The RTP timestamp of the next frame.
+    pub fn set_timestamp(&self, timestamp: u32) {
+        self.state.set_timestamp(timestamp);
+    }
 }
 
 impl VideoPacketizer for H265Packetizer {

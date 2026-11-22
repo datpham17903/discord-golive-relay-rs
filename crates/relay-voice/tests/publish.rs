@@ -857,17 +857,75 @@ async fn test_h264_idr_au_becomes_valid_rtp_passthrough() {
             previous = Some((p.packet.sequence, ts));
         }
         if n > 0 {
+            // stamped from the sender's clock: about 3000 per frame at 30 fps on 90 kHz
             let prev_ts = complete[n - 1][0].packet.timestamp;
             let step = ts.wrapping_sub(prev_ts);
             assert!(
-                (2999..=3001).contains(&step),
-                "30 fps on a 90 kHz clock steps 3000, got {step}"
+                (1500..=4500).contains(&step),
+                "30 fps steps ~3000, got {step}"
             );
         }
         let au = depacketize(VoiceCodec::H264, frame);
         let expected = if n == 0 { &key } else { &delta };
         assert_eq!(annex_b_nalus(&au), annex_b_nalus(expected));
     }
+    stream.disconnect().await;
+}
+
+/// A key frame, then nothing for `stall`, then delta frames: a source that stalls.
+struct StallingSource {
+    key: Option<Vec<u8>>,
+    delta: Vec<u8>,
+    stall: Duration,
+    resume: Option<Instant>,
+}
+
+impl FrameSource for StallingSource {
+    fn next_video(&mut self) -> Option<OutFrame> {
+        let data = match self.key.take() {
+            Some(key) => {
+                self.resume = Some(Instant::now() + self.stall);
+                key
+            }
+            None if self.resume.is_some_and(|t| Instant::now() < t) => return None,
+            None => self.delta.clone(),
+        };
+        Some(OutFrame {
+            data,
+            frame_time_ms: FRAME_MS,
+        })
+    }
+
+    fn next_audio(&mut self) -> Vec<u8> {
+        OPUS_FRAME.to_vec()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_video_timestamps_count_a_source_stall() {
+    let rig = rig(RtcCfg::stream("H264", None)).await;
+    let stream = create(&rig).await;
+    let mut tap = Tap::new(&rig.stream_rtc);
+    let source = StallingSource {
+        key: Some(codec_fixture("h264", "1920x1080", "key")),
+        delta: codec_fixture("h264", "1920x1080", "delta"),
+        stall: Duration::from_millis(400),
+        resume: None,
+    };
+    stream.play(source, params()).unwrap();
+    let wire = tap
+        .wait("frames after the stall", |w| {
+            frames_of(&video_packets(w, VIDEO_SSRC)).len() >= 3
+        })
+        .await;
+    let frames = frames_of(&video_packets(wire, VIDEO_SSRC));
+    let step = frames[1][0]
+        .packet
+        .timestamp
+        .wrapping_sub(frames[0][0].packet.timestamp);
+    // the 400 ms the source sent nothing count on the video clock, as they do on the audio one
+    // (one frame's increment, 3000, left video behind audio by the whole stall)
+    assert!((90 * 380..=90 * 1000).contains(&step), "{step}");
     stream.disconnect().await;
 }
 

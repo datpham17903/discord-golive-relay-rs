@@ -12,8 +12,9 @@ pub trait FrameSource: Send {
     /// `OutFrame::frame_time_ms` is the pause before the following frame.
     fn next_video(&mut self) -> Option<OutFrame>;
 
-    /// The next 20 ms Opus frame; the sender calls it every 20 ms. An empty vector means "nothing to
-    /// send this tick" (the 20 ms cadence continues).
+    /// The next 20 ms Opus frame; the sender calls it every 20 ms. An empty vector means "send nothing
+    /// this tick": the cadence continues and the audio RTP timestamp advances one frame without a packet, so
+    /// the viewer conceals the 20 ms.
     fn next_audio(&mut self) -> Vec<u8>;
 }
 

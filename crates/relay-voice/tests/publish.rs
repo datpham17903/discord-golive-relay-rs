@@ -682,6 +682,29 @@ impl FrameSource for TestSource {
     }
 }
 
+/// Like `TestSource`, but the audio tick with index `gap_tick` is an empty vector (a gap).
+struct GapSource {
+    inner: TestSource,
+    ticks: usize,
+    gap_tick: usize,
+}
+
+impl FrameSource for GapSource {
+    fn next_video(&mut self) -> Option<OutFrame> {
+        self.inner.next_video()
+    }
+
+    fn next_audio(&mut self) -> Vec<u8> {
+        let tick = self.ticks;
+        self.ticks += 1;
+        if tick == self.gap_tick {
+            Vec::new()
+        } else {
+            self.inner.next_audio()
+        }
+    }
+}
+
 fn h264_source() -> TestSource {
     TestSource::new(
         codec_fixture("h264", "1920x1080", "key"),
@@ -1219,6 +1242,45 @@ async fn test_opus_goes_out_every_20_ms_and_stops_with_silence() {
     let last_video_state = rig.stream_rtc.messages(12).pop().unwrap();
     assert_eq!(last_video_state["d"]["video_ssrc"], 0);
     assert_eq!(last_video_state["d"]["streams"], json!([]));
+    stream.disconnect().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_empty_audio_frame_sends_nothing_and_skips_20_ms_of_timestamp() {
+    let rig = rig(RtcCfg::stream("H264", None)).await;
+    let stream = create(&rig).await;
+    let mut tap = Tap::new(&rig.stream_rtc);
+    let source = GapSource {
+        inner: h264_source(),
+        ticks: 0,
+        gap_tick: 3,
+    };
+    stream.play(source, params()).unwrap();
+
+    let wire = tap
+        .wait("8 Opus packets", |w| audio_packets(w).len() >= 8)
+        .await;
+    let audio = audio_packets(wire);
+    let jumps = audio
+        .windows(2)
+        .filter(|pair| {
+            let (a, b) = (&pair[0].1.packet, &pair[1].1.packet);
+            assert_eq!(b.sequence, a.sequence.wrapping_add(1));
+            b.timestamp == a.timestamp.wrapping_add(1920)
+        })
+        .count();
+    assert_eq!(
+        jumps, 1,
+        "exactly the empty tick skips one frame of timestamp"
+    );
+    for pair in audio.windows(2) {
+        let delta = pair[1]
+            .1
+            .packet
+            .timestamp
+            .wrapping_sub(pair[0].1.packet.timestamp);
+        assert!(delta == 960 || delta == 1920, "delta {delta}");
+    }
     stream.disconnect().await;
 }
 

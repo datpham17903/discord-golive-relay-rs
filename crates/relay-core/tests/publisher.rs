@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 use relay_core::publisher::{
+    AUDIO_ADJUST_SPACING_S, AUDIO_LAG_TOLERANCE_S, AUDIO_LEAD_MAX_S, AUDIO_LEAD_TOLERANCE_S,
     CATCHUP_FACTOR, MAX_EGRESS_AUS, MAX_PCM_BLOCKS, Publisher, PublisherSource, SendSnapshot,
     SendWindow, freezes_since, rates,
 };
@@ -555,4 +556,165 @@ fn test_snapshot_counts_frames_bytes_and_freezes_and_is_not_reset() {
     assert!(rates(&[], 10.0, &cur, 10.0).is_none());
     assert_eq!(freezes_since(&hist, 10.0, &cur, 300.0), 2);
     assert_eq!(freezes_since(&hist, 10.0, &cur, 5.0), 2);
+}
+
+const TICK: f64 = 0.02;
+const EPS: f64 = 1e-6;
+
+/// A real (non-silent) Opus frame carrying its index.
+fn voice(e: &Env, i: u8, deadline: f64) -> EgressAudio {
+    e.audio(&[0xFC, i, 1, 1, 1], deadline)
+}
+
+#[test]
+fn test_audio_steady_stream_plays_every_frame_on_time() {
+    let e = Env::new();
+    e.pub_.set_source(1, 1);
+    for i in 0..100u8 {
+        e.pub_.offer_audio(voice(&e, i, e.now()));
+        assert_eq!(e.pub_.next_audio()[1], i);
+        e.advance(TICK);
+    }
+    let w = e.pub_.take_window();
+    assert_eq!(
+        (
+            w.audio_played,
+            w.audio_held_reads,
+            w.audio_gaps,
+            w.audio_skipped
+        ),
+        (100, 0, 0, 0)
+    );
+}
+
+#[test]
+fn test_audio_start_holds_silence_until_due() {
+    let e = Env::new();
+    e.pub_.set_source(1, 1);
+    e.pub_.offer_audio(voice(&e, 1, e.now() + 0.09));
+    for _ in 0..5 {
+        assert_eq!(e.pub_.next_audio(), silence());
+        e.advance(TICK);
+    }
+    assert_eq!(e.pub_.next_audio()[1], 1);
+    let w = e.pub_.take_window();
+    assert_eq!((w.audio_held_reads, w.audio_gaps), (5, 0));
+}
+
+#[test]
+fn test_audio_jitter_jump_while_flowing_gaps_instead_of_silence() {
+    let e = Env::new();
+    e.pub_.set_source(1, 1);
+    let mut deadlines = Vec::new();
+    let mut gaps = Vec::new();
+    let mut leads = Vec::new();
+    for n in 0..100u8 {
+        let offset = if n < 20 { 0.0 } else { 0.1 };
+        let deadline = e.now() + offset;
+        deadlines.push(deadline);
+        e.pub_.offer_audio(voice(&e, n, deadline));
+        let out = e.pub_.next_audio();
+        assert_ne!(out, silence(), "silence mid-flow at tick {n}");
+        if out.is_empty() {
+            gaps.push(e.now());
+        } else {
+            leads.push(deadlines[out[1] as usize] - e.now());
+        }
+        e.advance(TICK);
+    }
+    assert!(!gaps.is_empty());
+    for pair in gaps.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= AUDIO_ADJUST_SPACING_S - EPS,
+            "{pair:?}"
+        );
+    }
+    assert!(*leads.last().unwrap() <= AUDIO_LEAD_TOLERANCE_S + EPS);
+    assert_eq!(e.pub_.take_window().audio_gaps, gaps.len() as u64);
+}
+
+#[test]
+fn test_audio_lead_beyond_max_gaps_without_spacing() {
+    let e = Env::new();
+    e.pub_.set_source(1, 1);
+    e.pub_.offer_audio(voice(&e, 0, e.now()));
+    assert_eq!(e.pub_.next_audio()[1], 0);
+    e.advance(TICK);
+    e.pub_
+        .offer_audio(voice(&e, 1, e.now() + AUDIO_LEAD_MAX_S + 0.05));
+    assert!(e.pub_.next_audio().is_empty());
+    e.advance(TICK);
+    assert!(e.pub_.next_audio().is_empty());
+}
+
+#[test]
+fn test_audio_lag_after_deadlines_move_earlier_is_skipped_in_spaced_steps() {
+    let e = Env::new();
+    e.pub_.set_source(1, 1);
+    let start = e.now();
+    let mut deadlines = Vec::new();
+    for i in 0..MAX_PCM_BLOCKS as u8 {
+        let deadline = start - 0.1 + TICK * f64::from(i);
+        deadlines.push(deadline);
+        e.pub_.offer_audio(voice(&e, i, deadline));
+    }
+    let mut played = Vec::new();
+    for _ in 0..30 {
+        let out = e.pub_.next_audio();
+        assert_ne!(out, silence());
+        assert!(!out.is_empty());
+        played.push((e.now(), out[1]));
+        e.advance(TICK);
+    }
+    let skip_times: Vec<f64> = played
+        .windows(2)
+        .filter(|p| p[1].1 > p[0].1 + 1)
+        .map(|p| p[1].0)
+        .collect();
+    assert!(!skip_times.is_empty());
+    for pair in skip_times.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= AUDIO_ADJUST_SPACING_S - EPS,
+            "{pair:?}"
+        );
+    }
+    let (now, idx) = *played.last().unwrap();
+    assert!(now - deadlines[idx as usize] <= AUDIO_LAG_TOLERANCE_S + TICK + EPS);
+    let w = e.pub_.take_window();
+    assert!(w.audio_skipped >= 2);
+    assert_eq!(w.audio_late_dropped, 0);
+}
+
+#[test]
+fn test_audio_silent_head_frames_adjust_without_spacing() {
+    let e = Env::new();
+    e.pub_.set_source(1, 1);
+    e.pub_.offer_audio(voice(&e, 0, e.now()));
+    assert_eq!(e.pub_.next_audio()[1], 0);
+    e.advance(TICK);
+    // overdue silent frames are dropped back to back, however recently an adjustment was made
+    for _ in 0..3 {
+        e.pub_.offer_audio(e.audio(&OPUS_SILENCE, e.now() - 0.1));
+    }
+    e.pub_.offer_audio(voice(&e, 1, e.now() - 0.1));
+    assert_eq!(e.pub_.next_audio()[1], 1);
+    // a silent frame ahead of its deadline waits (silence, not a gap)
+    e.pub_.offer_audio(voice(&e, 2, e.now()));
+    e.advance(TICK);
+    e.pub_.offer_audio(e.audio(&OPUS_SILENCE, e.now() + 0.1));
+    assert_eq!(e.pub_.next_audio()[1], 2);
+    assert_eq!(e.pub_.next_audio(), silence());
+    let w = e.pub_.take_window();
+    assert_eq!((w.audio_gaps, w.audio_skipped), (0, 0));
+}
+
+#[test]
+fn test_audio_later_than_max_late_is_still_dropped() {
+    let e = Env::new();
+    e.pub_.set_source(1, 1);
+    e.pub_.offer_audio(voice(&e, 1, e.now() - 0.3));
+    e.pub_.offer_audio(voice(&e, 2, e.now()));
+    assert_eq!(e.pub_.next_audio()[1], 2);
+    let w = e.pub_.take_window();
+    assert_eq!((w.audio_late_dropped, w.audio_skipped), (1, 0));
 }

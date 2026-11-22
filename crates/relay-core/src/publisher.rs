@@ -36,10 +36,20 @@ pub const FREEZE_S: f64 = 0.25;
 /// 800 ms: audio is held as long as video sits in the 600 ms jitter buffer. (Python name; the unit is Opus
 /// frames here.)
 pub const MAX_PCM_BLOCKS: usize = 40;
+/// An audio frame this much ahead of its deadline while audio flows is still played now.
+pub const AUDIO_LEAD_TOLERANCE_S: f64 = 0.03;
+/// Beyond this lead a gap is inserted at once, regardless of `AUDIO_ADJUST_SPACING_S`.
+pub const AUDIO_LEAD_MAX_S: f64 = 0.12;
+/// An audio frame this much past its deadline is skipped (if another is queued) to catch up.
+pub const AUDIO_LAG_TOLERANCE_S: f64 = 0.04;
+/// Minimum time between two audible adjustments (gap or skip) of the audio timeline.
+pub const AUDIO_ADJUST_SPACING_S: f64 = 0.1;
 
 /// Send counters since the last [`Publisher::take_window`]: sent, stalls (gaps over 50 ms),
 /// `max_send_gap_ms`, audio frames played / late-dropped / evicted (queue overflow) and `audio_held_reads`
-/// (silent reads while the head frame was not yet due).
+/// (silent reads while the head frame was not yet due), `audio_gaps` (empty reads that make the sender skip
+/// 20 ms of the RTP timeline to let a too-early head frame come due) and `audio_skipped` (overdue frames
+/// dropped to catch up).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SendWindow {
     pub sent: u64,
@@ -49,6 +59,8 @@ pub struct SendWindow {
     pub audio_held_reads: u64,
     pub audio_late_dropped: u64,
     pub audio_evicted: u64,
+    pub audio_gaps: u64,
+    pub audio_skipped: u64,
 }
 
 /// Cumulative, never-reset video send counters.
@@ -112,6 +124,10 @@ struct State {
     video: VecDeque<EgressVideo>,
     video_bytes: usize,
     audio: VecDeque<EgressAudio>,
+    /// The last `next_audio` returned a real, non-silent frame.
+    audio_flowing: bool,
+    /// Time of the last gap or skip decided on a non-silent frame.
+    last_audio_adjust: f64,
     /// Discard source AUs until an IDR with SPS/PPS.
     await_idr: bool,
     /// `idr_pic_id` of the last sent AU if it was an IDR, else `None`.
@@ -226,6 +242,8 @@ impl Publisher {
                 video: VecDeque::new(),
                 video_bytes: 0,
                 audio: VecDeque::new(),
+                audio_flowing: false,
+                last_audio_adjust: f64::NEG_INFINITY,
                 await_idr: false,
                 last_idr_id: None,
                 last_idr_from_slate: false,
@@ -439,27 +457,69 @@ impl Publisher {
         (None, need)
     }
 
-    /// One 20 ms Opus frame, or `OPUS_SILENCE` when none is due.
+    /// One 20 ms Opus frame, `OPUS_SILENCE` when none is due, or an empty vector (a gap: the sender skips
+    /// 20 ms of the RTP timeline without sending) to let a head frame that is too early come due.
+    ///
+    /// While audio flows, the timeline follows the head deadlines in few, spaced adjustments instead of
+    /// inserting silence or letting the lag stand; silent frames and a not-yet-flowing stream adjust for free.
     pub fn next_audio(&self) -> Vec<u8> {
         let mut st = self.state.lock();
         let now = (self.clock)();
         if !self.gate_open_locked(&st, now) {
             st.audio.clear();
+            st.audio_flowing = false;
             return OPUS_SILENCE.to_vec();
         }
-        while let Some(head) = st.audio.front() {
-            if head.deadline > now {
-                st.window.audio_held_reads += 1;
-                return OPUS_SILENCE.to_vec(); // hold until the shared-timeline deadline, like video
+        loop {
+            let Some(head) = st.audio.front() else {
+                st.audio_flowing = false;
+                return OPUS_SILENCE.to_vec();
+            };
+            let early = head.deadline - now;
+            let silent = head.opus.len() <= 3;
+            let spaced = now - st.last_audio_adjust >= AUDIO_ADJUST_SPACING_S;
+            if early > 0.0 {
+                if !st.audio_flowing || silent {
+                    st.audio_flowing = false;
+                    st.window.audio_held_reads += 1;
+                    return OPUS_SILENCE.to_vec(); // hold until the shared-timeline deadline, like video
+                }
+                if early > AUDIO_LEAD_TOLERANCE_S {
+                    if early > AUDIO_LEAD_MAX_S {
+                        st.window.audio_gaps += 1;
+                        return Vec::new();
+                    }
+                    if spaced {
+                        st.last_audio_adjust = now;
+                        st.window.audio_gaps += 1;
+                        return Vec::new();
+                    }
+                }
+            } else {
+                let late = -early;
+                if late > self.max_late {
+                    st.audio.pop_front();
+                    st.window.audio_late_dropped += 1;
+                    continue;
+                }
+                if late > AUDIO_LAG_TOLERANCE_S && st.audio.len() > 1 {
+                    if silent {
+                        st.audio.pop_front();
+                        continue;
+                    }
+                    if spaced {
+                        st.last_audio_adjust = now;
+                        st.audio.pop_front();
+                        st.window.audio_skipped += 1;
+                        continue;
+                    }
+                }
             }
             let au = st.audio.pop_front().expect("front checked");
-            if now - au.deadline <= self.max_late {
-                st.window.audio_played += 1;
-                return au.opus;
-            }
-            st.window.audio_late_dropped += 1;
+            st.window.audio_played += 1;
+            st.audio_flowing = !silent;
+            return au.opus;
         }
-        OPUS_SILENCE.to_vec()
     }
 }
 

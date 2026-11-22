@@ -566,7 +566,11 @@ impl Sender {
                 None => return,
             }
         };
-        if !data.is_empty() {
+        if data.is_empty() {
+            let mut active = self.active.lock();
+            let audio = &mut active.audio;
+            audio.timestamp = audio.timestamp.wrapping_add(AUDIO_SAMPLES_PER_FRAME);
+        } else {
             self.send_audio_packet(&data);
         }
     }

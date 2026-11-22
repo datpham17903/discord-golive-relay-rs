@@ -3853,6 +3853,7 @@ impl Service {
             json!({"sent": w.sent, "stalls": w.stalls, "max_send_gap_ms": w.max_send_gap_ms,
                    "audio_played": w.audio_played, "audio_held_reads": w.audio_held_reads,
                    "audio_late_dropped": w.audio_late_dropped, "audio_evicted": w.audio_evicted,
+                   "audio_gaps": w.audio_gaps, "audio_skipped": w.audio_skipped,
                    "codec": self.publisher.codec()}),
         );
         let audio = c
@@ -3895,6 +3896,8 @@ impl Service {
                 m.insert("audio_held_reads".into(), json!(w.audio_held_reads));
                 m.insert("audio_late_dropped".into(), json!(w.audio_late_dropped));
                 m.insert("audio_evicted".into(), json!(w.audio_evicted));
+                m.insert("audio_gaps".into(), json!(w.audio_gaps));
+                m.insert("audio_skipped".into(), json!(w.audio_skipped));
             }
             if c.network_stats {
                 let net = c

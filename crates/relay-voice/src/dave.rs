@@ -430,6 +430,8 @@ impl Inner {
         // Transitions announced for the old session can never complete on the new one.
         self.pending.clear();
         self.downgraded = false;
+        // A new group: nobody holds its key yet.
+        self.roster.clear();
         if let Some(version) = NonZeroU16::new(self.protocol_version) {
             let (user_id, group_id) = (self.user_id, self.group_id);
             match self.session.as_mut() {

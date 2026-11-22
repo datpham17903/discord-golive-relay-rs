@@ -233,6 +233,35 @@ fn removal_only_transition_reports_no_members_added() {
     drop(b);
 }
 
+/// The group is re-created (epoch 1) when the next viewer joins: a returning member is new to it.
+#[test]
+fn re_created_group_re_adding_a_former_member_reports_members_added() {
+    let (gateway, a, b) = establish_with_gateway(0);
+    drop(b);
+    key_package(&a.on_prepare_epoch(1, 1).unwrap());
+    a.on_binary(op::MLS_EXTERNAL_SENDER, &gateway.marshalled())
+        .unwrap();
+    let b = Dave::new(USER_B, CHANNEL);
+    let kp_b = key_package(&b.on_session_description(1).unwrap());
+    let mut proposals = vec![0u8];
+    proposals.extend_from_slice(&gateway.propose_add(0, &kp_b));
+    let outs = a.on_binary(op::MLS_PROPOSALS, &proposals).unwrap();
+    let [DaveOut::CommitWelcome(payload)] = outs.as_slice() else {
+        panic!("expected commit+welcome, got {outs:?}");
+    };
+    let (commit, _) = split_commit_welcome(payload);
+    assert_eq!(
+        a.on_binary(
+            op::MLS_ANNOUNCE_COMMIT_TRANSITION,
+            &with_transition(0, &commit)
+        )
+        .unwrap(),
+        vec![DaveOut::Executed {
+            members_added: true
+        }]
+    );
+}
+
 #[test]
 fn transition_zero_applies_immediately() {
     let (a, b) = establish(0);

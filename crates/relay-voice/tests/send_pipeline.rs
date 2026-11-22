@@ -12,7 +12,7 @@ use relay_media::codec::VoiceCodec;
 use relay_voice::transport::TransportEncryptionMode;
 use relay_voice::transport::net::UdpTransport;
 use relay_voice::transport::packets::{DecryptedRtpPacket, SendError, SharedTransportCrypto};
-use relay_voice::video::{PacketSink, VideoSendPipeline, depacketizer_for};
+use relay_voice::video::{PacketSink, VideoPacing, VideoSendPipeline, depacketizer_for};
 
 const SSRC: u32 = 0x1000_0001;
 const RTX_SSRC: u32 = 0x1000_0002;
@@ -45,7 +45,18 @@ fn send(
     frame: &[u8],
 ) -> relay_voice::video::VideoSendSummary {
     pipeline
-        .send_video_frame(crypto, sink, SSRC, frame, None, FRAME_MS, "screen", 0, 0.0)
+        .send_video_frame(
+            crypto,
+            sink,
+            SSRC,
+            frame,
+            None,
+            FRAME_MS,
+            "screen",
+            0,
+            0.0,
+            VideoPacing::Burst,
+        )
         .unwrap()
 }
 
@@ -161,7 +172,18 @@ fn test_stream_bookkeeping() {
     let crypto = crypto();
     let sink = CollectSink::default();
     let err = pipeline
-        .send_video_frame(&crypto, &sink, 99, b"x", None, FRAME_MS, "screen", 0, 0.0)
+        .send_video_frame(
+            &crypto,
+            &sink,
+            99,
+            b"x",
+            None,
+            FRAME_MS,
+            "screen",
+            0,
+            0.0,
+            VideoPacing::Burst,
+        )
         .unwrap_err();
     assert!(err.to_string().contains("Unknown video stream SSRC: 99"));
 }
@@ -412,7 +434,16 @@ fn test_burst_pacing_spreads_packets_over_time() {
     let started = Instant::now();
     let summary = pipeline
         .send_video_frame(
-            &crypto, &sink, SSRC, &frame, None, FRAME_MS, "screen", 15, 0.02,
+            &crypto,
+            &sink,
+            SSRC,
+            &frame,
+            None,
+            FRAME_MS,
+            "screen",
+            15,
+            0.02,
+            VideoPacing::Burst,
         )
         .unwrap();
     let elapsed = started.elapsed();
@@ -423,6 +454,77 @@ fn test_burst_pacing_spreads_packets_over_time() {
         "paced send took {elapsed:?}"
     );
     assert_eq!(sink.take().len(), 45);
+}
+
+struct TimedSink(std::sync::Mutex<Vec<Instant>>);
+
+impl PacketSink for TimedSink {
+    fn send_packet(&self, _packet: &[u8]) -> io::Result<()> {
+        self.0.lock().unwrap().push(Instant::now());
+        Ok(())
+    }
+}
+
+#[test]
+fn test_smooth_pacing_spreads_a_frame_over_the_spread_window() {
+    let pipeline = pipeline_for(VoiceCodec::VP8, false);
+    let sink = TimedSink(Default::default());
+    let frame = codec_fixture("vp8", "1280x720", "key");
+
+    let started = Instant::now();
+    let summary = pipeline
+        .send_video_frame(
+            &crypto(),
+            &sink,
+            SSRC,
+            &frame,
+            None,
+            FRAME_MS,
+            "screen",
+            12,
+            0.001,
+            VideoPacing::Smooth,
+        )
+        .unwrap();
+    let times = sink.0.lock().unwrap().clone();
+    assert_eq!(times.len(), summary.sent);
+    assert!(summary.sent > 1);
+    // spread = min(33.3 ms / 2, 8 ms): the last packet leaves at 8 ms * (n - 1) / n
+    let last = *times.last().unwrap() - started;
+    let expected =
+        Duration::from_millis(8).mul_f64((summary.sent - 1) as f64 / summary.sent as f64);
+    assert!(last >= expected, "last packet after {last:?}");
+    assert!(
+        last < Duration::from_millis(100),
+        "last packet after {last:?}"
+    );
+    assert!(
+        times[1] - times[0] < Duration::from_millis(4),
+        "the first packets are not held back"
+    );
+}
+
+#[test]
+fn test_smooth_pacing_never_waits_for_a_single_packet() {
+    let pipeline = pipeline_for(VoiceCodec::VP8, false);
+    let sink = TimedSink(Default::default());
+    let started = Instant::now();
+    let summary = pipeline
+        .send_video_frame(
+            &crypto(),
+            &sink,
+            SSRC,
+            b"tiny",
+            None,
+            FRAME_MS,
+            "screen",
+            12,
+            0.001,
+            VideoPacing::Smooth,
+        )
+        .unwrap();
+    assert_eq!(summary.sent, 1);
+    assert!(started.elapsed() < Duration::from_millis(4));
 }
 
 struct FailingSink;
@@ -447,6 +549,7 @@ fn test_sink_errors_surface_as_send_errors() {
             "screen",
             0,
             0.0,
+            VideoPacing::Burst,
         )
         .unwrap_err();
     assert!(matches!(err, SendError::Io(ref io) if io.kind() == io::ErrorKind::BrokenPipe));
@@ -467,6 +570,7 @@ fn test_empty_frame_is_an_error_not_a_panic() {
             "screen",
             0,
             0.0,
+            VideoPacing::Burst,
         )
         .unwrap_err();
     assert!(matches!(err, SendError::Value(_)));
@@ -497,7 +601,16 @@ fn test_pipeline_to_udp_loopback_and_back() {
     let frame = codec_fixture("vp8", "1280x720", "key");
     let summary = pipeline
         .send_video_frame(
-            &crypto, &transport, SSRC, &frame, None, FRAME_MS, "screen", 0, 0.0,
+            &crypto,
+            &transport,
+            SSRC,
+            &frame,
+            None,
+            FRAME_MS,
+            "screen",
+            0,
+            0.0,
+            VideoPacing::Burst,
         )
         .unwrap();
     assert_eq!(transport.stats().packets_sent, summary.sent);

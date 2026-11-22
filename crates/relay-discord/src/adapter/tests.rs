@@ -43,6 +43,7 @@ fn options(control: ControlConfig) -> AdapterOptions {
         parent_codecs: vec![VoiceCodec::H264],
         watch_codecs: vec![VoiceCodec::H264],
         network_stats: false,
+        video_pacing: VideoPacing::default(),
         self_deaf: true,
         urls: Urls::default(),
         connect_timeout: Duration::from_millis(300),

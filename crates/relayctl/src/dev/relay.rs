@@ -36,6 +36,7 @@ use relay_voice::StreamClient;
 use relay_voice::VoiceClient;
 use relay_voice::publish::{SendStats, VideoParams};
 use relay_voice::receive::{MediaType, Packet};
+use relay_voice::video::VideoPacing;
 use relay_voice::voice_ws::video_codec_list;
 use serde_json::{Value, json};
 use tokio::sync::{oneshot, watch};
@@ -519,7 +520,7 @@ impl Relay {
         let bitrate =
             u32::try_from(self.profile.video_bitrate_kbps.saturating_mul(1000)).unwrap_or(0);
 
-        let settings = output_settings(true, fps, false, user_agent);
+        let settings = output_settings(true, fps, false, user_agent, VideoPacing::default());
         let out = voice
             .create_stream(settings, OUTPUT_TIMEOUT)
             .await

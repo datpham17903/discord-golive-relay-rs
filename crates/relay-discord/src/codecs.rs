@@ -3,6 +3,7 @@
 
 use relay_media::codec::{UnknownCodec, VoiceCodec};
 use relay_voice::connection::RtcSettings;
+use relay_voice::video::VideoPacing;
 use relay_voice::voice_ws::{CodecSpec, video_codec_list};
 
 /// Every video codec in `CODEC_ORDER` order: what adaptive mode offers for decode and encode.
@@ -41,6 +42,14 @@ pub fn decode_codecs(codecs: &[VoiceCodec]) -> Vec<CodecSpec> {
     out
 }
 
+/// `runtime.video_pacing` as the voice crate's setting.
+pub fn video_pacing(pacing: relay_core::config::VideoPacing) -> VideoPacing {
+    match pacing {
+        relay_core::config::VideoPacing::Smooth => VideoPacing::Smooth,
+        relay_core::config::VideoPacing::Burst => VideoPacing::Burst,
+    }
+}
+
 /// `output_codecs`: Opus and H264 only.
 pub fn h264_output_codecs() -> Vec<CodecSpec> {
     vec![
@@ -57,6 +66,7 @@ pub fn output_settings(
     fps: u32,
     debug_stats: bool,
     user_agent: &str,
+    pacing: VideoPacing,
 ) -> RtcSettings {
     let codecs = if adaptive {
         video_codec_list(&ALL_VIDEO_CODECS, true)
@@ -66,6 +76,7 @@ pub fn output_settings(
     let mut settings = RtcSettings::publish(codecs, true, fps);
     settings.user_agent = user_agent.to_owned();
     settings.receive.debug_stats = debug_stats;
+    settings.send.pacing = pacing;
     settings
 }
 
@@ -111,16 +122,17 @@ mod tests {
 
     #[test]
     fn the_h264_output_offers_only_h264_and_opus() {
-        let settings = output_settings(false, 30, false, "UA");
+        let settings = output_settings(false, 30, false, "UA", VideoPacing::Smooth);
         assert_eq!(names(&settings.receive.codecs), ["opus", "H264"]);
         assert!(settings.receive.codecs[1].encode);
         assert_eq!(settings.user_agent, "UA");
         assert!(!settings.receive.debug_stats);
+        assert_eq!(settings.send.pacing, VideoPacing::Smooth);
     }
 
     #[test]
     fn the_adaptive_output_offers_every_codec_for_encode() {
-        let settings = output_settings(true, 60, true, "");
+        let settings = output_settings(true, 60, true, "", VideoPacing::Burst);
         assert_eq!(
             names(&settings.receive.codecs),
             ["opus", "AV1", "H265", "H264", "VP8", "VP9"]
@@ -132,5 +144,6 @@ mod tests {
         );
         assert_eq!(settings.streams.len(), 1);
         assert_eq!(settings.streams[0].max_framerate, Some(60));
+        assert_eq!(settings.send.pacing, VideoPacing::Burst);
     }
 }

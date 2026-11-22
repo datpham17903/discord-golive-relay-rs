@@ -20,7 +20,7 @@ pub use h26x::strip_h264_filler_nalus;
 pub use h264::{H264Depacketizer, H264Packetizer};
 pub use h265::{H265Depacketizer, H265Packetizer};
 pub use send::{
-    NackResendSummary, PacketSink, RtxSendSummary, VideoSendPipeline, VideoSendSummary,
+    NackResendSummary, PacketSink, RtxSendSummary, VideoPacing, VideoSendPipeline, VideoSendSummary,
 };
 pub use vp8::{VP8Depacketizer, VP8Packetizer};
 pub use vp9::{VP9Depacketizer, VP9Packetizer};

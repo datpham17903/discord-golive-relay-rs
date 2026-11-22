@@ -14,6 +14,7 @@ use relay_core::config::{CodecPolicy, OutputAccount, OutputCodec, RelayConfig};
 use relay_core::supervisor::outputs_model::PoolEvent;
 use relay_media::codec::VoiceCodec;
 use relay_voice::connection::{RECONNECT_TIMEOUT, RtcSettings};
+use relay_voice::video::VideoPacing;
 use relay_voice::voice_ws::{StreamSpec, video_codec_list};
 use relay_voice::{ClientEvent, JoinOptions, StreamClient, VoiceClient, VoiceClientConfig};
 use serde_json::{Value, json};
@@ -29,6 +30,7 @@ use crate::api::{
 use crate::cache::{Cache, CacheChange, SharedCache, StreamKey, StreamState};
 use crate::codecs::{
     ALL_VIDEO_CODECS, adaptive_decode_codecs, decode_codecs, output_settings, parse_names,
+    video_pacing,
 };
 use crate::link::{link_event, snowflake};
 use crate::net::Net;
@@ -49,6 +51,7 @@ pub struct OutputOptions {
     pub parent_codecs: Vec<VoiceCodec>,
     pub adaptive: bool,
     pub network_stats: bool,
+    pub video_pacing: VideoPacing,
     /// Never join while one of these is in the channel.
     pub excluded_viewer_ids: HashSet<u64>,
     /// Never counted as viewers of this account's Go Live (the account itself is added).
@@ -77,6 +80,7 @@ impl OutputOptions {
             parent_codecs: codecs,
             adaptive,
             network_stats: cfg.logging.network_stats,
+            video_pacing: video_pacing(cfg.runtime.video_pacing),
             excluded_viewer_ids: cfg
                 .authorization
                 .excluded_viewer_ids
@@ -449,6 +453,7 @@ impl Inner {
             params.fps,
             self.opts.network_stats,
             &net.user_agent,
+            self.opts.video_pacing,
         );
         if adaptive {
             // op 14 can land before create_stream returns: the hook must already be in place

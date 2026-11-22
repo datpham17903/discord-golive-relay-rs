@@ -180,6 +180,33 @@ fn assert_frame(packet: &Packet, codec: &str, frame: &Frame) {
 }
 
 #[test]
+fn test_frame_arrival_spread_is_counted_per_completed_frame() {
+    let rig = rig(|_| {});
+    let (wire, frames) = capture("vp8");
+    let first = frames[0].packets.len();
+    let second = frames[1].packets.len();
+    assert!(first >= 2, "the key frame has several packets");
+    // the key frame trickles in 3 ms apart, the next frame lands at one instant
+    let t0 = Instant::now();
+    let mut arrivals = Vec::new();
+    for i in 0..first {
+        arrivals.push(t0 + Duration::from_millis(3 * i as u64));
+    }
+    for _ in 0..second {
+        arrivals.push(t0 + Duration::from_secs(1));
+    }
+    let out = rig
+        .rx
+        .process_batch_timed(&wire, &arrivals, t0 + Duration::from_secs(2));
+    assert_eq!(out.len(), 2);
+    let stats = rig.rx.stats();
+    let counted = 1 + u64::from(second >= 2);
+    assert_eq!(stats["video_frame_spread_frames"], counted);
+    assert_eq!(stats["video_frame_spread_us"], 3000 * (first as u64 - 1));
+    assert_eq!(stats["video_frames_spread_over_2ms"], 1);
+}
+
+#[test]
 fn test_every_codec_assembles_one_au_per_frame() {
     for codec in CODEC_NAMES {
         let rig = rig(|_| {});

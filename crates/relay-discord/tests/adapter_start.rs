@@ -17,6 +17,7 @@ use relay_discord::{
     OutputAdapter, OutputOptions, Token, Urls,
 };
 use relay_media::codec::VoiceCodec;
+use relay_voice::video::VideoPacing;
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -182,6 +183,7 @@ fn ingest_options(urls: Urls) -> AdapterOptions {
         parent_codecs: vec![VoiceCodec::H264],
         watch_codecs: vec![VoiceCodec::H264],
         network_stats: false,
+        video_pacing: VideoPacing::default(),
         self_deaf: true,
         urls,
         connect_timeout: Duration::from_secs(1),
@@ -196,6 +198,7 @@ fn output_options(urls: Urls) -> OutputOptions {
         parent_codecs: vec![VoiceCodec::H264],
         adaptive: true,
         network_stats: false,
+        video_pacing: VideoPacing::default(),
         excluded_viewer_ids: Default::default(),
         bot_user_ids: [RELAY, OUT].into(),
         self_deaf: true,

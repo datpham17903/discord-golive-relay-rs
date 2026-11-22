@@ -61,6 +61,7 @@ runtime:
   stream_viewer_cap: 50       # viewers one Go Live can hold
   self_deaf_ingest: true      # the ingest joins voice self-muted and self-deafened; set false if a deafened ingest stops receiving the target's stream audio
   self_deaf_outputs: true     # relay/mirror accounts join self-muted and self-deafened (they only publish)
+  video_pacing: smooth        # smooth = spread each video frame's packets over up to 8 ms; burst = send them back to back
 
 liveness:
   source_dead_timeout_seconds: null   # must be the value measured in M0 before enabling

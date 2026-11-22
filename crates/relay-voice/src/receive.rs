@@ -514,6 +514,8 @@ pub struct ReceiveHealth {
 struct RxState {
     depacketizers: HashMap<(u32, u8), Box<dyn VideoDepacketizer + Send>>,
     frame_rtp: HashMap<(u32, u8), Vec<RtpPacketInfo>>,
+    /// Arrival of the first packet of the frame being built, valid while `frame_rtp` is not empty.
+    frame_first_at: HashMap<(u32, u8), Instant>,
     last_sequence: HashMap<u32, u16>,
     old_sequence_run: HashMap<u32, u32>,
     pending_nacks: HashMap<u32, HashMap<u16, PendingNack>>,
@@ -929,10 +931,11 @@ impl Receiver {
             p.decoded.sequence,
             p.decoded.timestamp,
         );
-        st.frame_rtp
-            .entry(key)
-            .or_default()
-            .push(p.rtp_packet.clone());
+        let building = st.frame_rtp.entry(key).or_default();
+        if building.is_empty() {
+            st.frame_first_at.insert(key, p.received_at);
+        }
+        building.push(p.rtp_packet.clone());
         let frame = match pushed {
             Ok(Some(frame)) => frame,
             Ok(None) => {
@@ -951,6 +954,18 @@ impl Receiver {
             }
         };
         let rtp_packets = std::mem::take(st.frame_rtp.entry(key).or_default());
+        // RTX arrivals carry the resend's time, not the SFU's spacing
+        if rtp_packets.len() >= 2
+            && !rtp_packets.iter().any(|r| r.rtx)
+            && let Some(first_at) = st.frame_first_at.get(&key)
+        {
+            let spread = p.received_at.saturating_duration_since(*first_at);
+            self.stat(st, "video_frame_spread_frames", 1);
+            self.stat(st, "video_frame_spread_us", spread.as_micros() as u64);
+            if spread >= Duration::from_millis(2) {
+                self.stat(st, "video_frames_spread_over_2ms", 1);
+            }
+        }
 
         // An earlier frame of this SSRC is still waiting for its key: queue behind it so frames
         // are never released out of order.

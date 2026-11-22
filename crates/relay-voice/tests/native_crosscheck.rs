@@ -12,7 +12,9 @@ use common::{
 };
 use relay_voice::transport::packets::{DecryptedRtpPacket, SharedTransportCrypto};
 use relay_voice::transport::{TransportCrypto, TransportEncryptionMode};
-use relay_voice::video::{VideoSendPipeline, depacketizer_for, strip_h264_filler_nalus};
+use relay_voice::video::{
+    VideoPacing, VideoSendPipeline, depacketizer_for, strip_h264_filler_nalus,
+};
 use serde_json::Value;
 
 fn crypto_from(manifest: &Value, mode: &str) -> SharedTransportCrypto {
@@ -218,6 +220,7 @@ fn test_rust_packetizers_emit_the_same_payloads_as_the_native_pipeline() {
                     entry["media_stream_type"].as_str().unwrap(),
                     0,
                     0.0,
+                    VideoPacing::Burst,
                 )
                 .unwrap();
             assert_eq!(

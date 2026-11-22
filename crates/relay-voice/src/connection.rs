@@ -30,7 +30,7 @@ use crate::receive::{Packet, ReceiveConfig, Receiver, SsrcMap, StreamSsrcs, Vide
 use crate::transport::TransportEncryptionMode;
 use crate::transport::net::{ListenerKinds, UdpStats, UdpTransport};
 use crate::transport::packets::SharedTransportCrypto;
-use crate::video::PacketSink;
+use crate::video::{PacketSink, VideoPacing};
 use crate::voice_ws::{
     CodecSpec, SessionInfo, StreamSpec, VOICE_GATEWAY_VERSION, VoiceEvent, VoiceToken, VoiceWs,
     VoiceWsConfig, choose_mode, gateway_url, op,
@@ -91,6 +91,8 @@ pub struct SendSettings {
     pub burst_size: usize,
     /// Seconds between bursts.
     pub burst_interval: f64,
+    /// Spacing of the packets of one video frame.
+    pub pacing: VideoPacing,
 }
 
 impl Default for SendSettings {
@@ -98,6 +100,7 @@ impl Default for SendSettings {
         Self {
             burst_size: 12,
             burst_interval: 0.001,
+            pacing: VideoPacing::default(),
         }
     }
 }

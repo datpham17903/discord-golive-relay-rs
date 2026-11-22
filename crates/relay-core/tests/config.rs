@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use relay_core::config::{
     AudioMode, CodecMode, CodecPolicy, ConfigInvalid, ControlConfig, OutputCodec, OutputProfile,
-    QualityMode, RelayConfig, VideoMode, apply_account_ids, check_operable, ignored_setting_notes,
-    load_config, load_config_with_warnings, unresolved_credentials,
+    QualityMode, RelayConfig, VideoMode, VideoPacing, apply_account_ids, check_operable,
+    ignored_setting_notes, load_config, load_config_with_warnings, unresolved_credentials,
 };
 use saphyr::{LoadableYamlNode, Yaml};
 use serde_json::{Value, json};
@@ -394,6 +394,28 @@ fn test_bad_ingest_options_rejected() {
         ),
     );
     assert!(any_err(&errs, "ingest_credential") && any_err(&errs, "ingest_publishes"));
+}
+
+#[test]
+fn test_video_pacing_defaults_to_smooth_and_accepts_only_known_values() {
+    let tmp = tempdir().unwrap();
+    let mut r = raw();
+    assert_eq!(
+        load_ok(tmp.path(), &r).runtime.video_pacing,
+        VideoPacing::Smooth
+    );
+    r["runtime"]["video_pacing"] = json!("burst");
+    assert_eq!(
+        load_ok(tmp.path(), &r).runtime.video_pacing,
+        VideoPacing::Burst
+    );
+    r["runtime"]["video_pacing"] = json!("smooth");
+    assert_eq!(
+        load_ok(tmp.path(), &r).runtime.video_pacing,
+        VideoPacing::Smooth
+    );
+    r["runtime"]["video_pacing"] = json!("paced");
+    assert!(any_err(&errors(tmp.path(), &r), "video_pacing"));
 }
 
 #[test]

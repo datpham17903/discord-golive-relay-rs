@@ -696,6 +696,7 @@ impl Sender {
             MEDIA_STREAM_TYPE,
             self.cfg.burst_size,
             self.cfg.burst_interval,
+            self.cfg.pacing,
         );
         match sent {
             Ok(summary) => {

@@ -231,6 +231,14 @@ pub struct AudioConfig {
     pub source: String,
 }
 
+/// `runtime.video_pacing`: how the packets of one published video frame are spaced.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VideoPacing {
+    #[default]
+    Smooth,
+    Burst,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeConfig {
     pub start_debounce_ms: u64,
@@ -250,6 +258,7 @@ pub struct RuntimeConfig {
     pub stream_viewer_cap: u64,
     pub self_deaf_ingest: bool,
     pub self_deaf_outputs: bool,
+    pub video_pacing: VideoPacing,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1151,6 +1160,14 @@ fn build(raw: Option<&Yaml>, errors: &Errors, warnings: &mut Vec<String>) -> Opt
     };
     let self_deaf_ingest = r.opt_bool("self_deaf_ingest", true);
     let self_deaf_outputs = r.opt_bool("self_deaf_outputs", true);
+    let video_pacing = if r.has("video_pacing") {
+        match r.str_("video_pacing", Some(&["smooth", "burst"])).as_str() {
+            "burst" => VideoPacing::Burst,
+            _ => VideoPacing::Smooth,
+        }
+    } else {
+        VideoPacing::Smooth
+    };
     let runtime = RuntimeConfig {
         start_debounce_ms,
         idle_voice_grace_seconds,
@@ -1169,6 +1186,7 @@ fn build(raw: Option<&Yaml>, errors: &Errors, warnings: &mut Vec<String>) -> Opt
         stream_viewer_cap,
         self_deaf_ingest,
         self_deaf_outputs,
+        video_pacing,
     };
     if r.has("relay_scale_down_seconds") {
         r.mark("relay_scale_down_seconds");

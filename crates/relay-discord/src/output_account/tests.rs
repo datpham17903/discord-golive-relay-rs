@@ -85,6 +85,7 @@ fn options() -> OutputOptions {
         parent_codecs: vec![VoiceCodec::H264],
         adaptive: false,
         network_stats: false,
+        video_pacing: VideoPacing::default(),
         excluded_viewer_ids: HashSet::new(),
         bot_user_ids: [40, 41].into(),
         self_deaf: true,

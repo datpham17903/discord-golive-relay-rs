@@ -229,17 +229,39 @@ fn packet_error(error: PacketError) -> SendError {
     SendError::Value(error.to_string())
 }
 
-/// Encrypts and sends `packets`, pacing them in bursts of `burst_size` every
-/// `burst_interval` seconds when both are positive. Returns `(sent, octets)`.
-/// Blocks the calling thread while pacing.
+/// How the packets of one video frame are spread over time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VideoPacing {
+    /// Bursts of `burst_size` packets every `burst_interval` seconds.
+    Burst,
+    /// Packet `i` of `n` leaves at `spread * i / n`, `spread` being half a frame time capped at 8 ms.
+    #[default]
+    Smooth,
+}
+
+const SMOOTH_SPREAD_CAP: Duration = Duration::from_millis(8);
+
+fn smooth_spread(frame_time_ms: f64) -> Duration {
+    let half_frame = frame_time_ms * 0.5;
+    if !half_frame.is_finite() || half_frame <= 0.0 {
+        return Duration::ZERO;
+    }
+    Duration::from_secs_f64(half_frame / 1000.0).min(SMOOTH_SPREAD_CAP)
+}
+
+/// Encrypts and sends `packets`. With `smooth_spread` they are spread evenly over that time;
+/// otherwise they go in bursts of `burst_size` every `burst_interval` seconds when both are
+/// positive. Returns `(sent, octets)`. Blocks the calling thread while pacing.
 fn send_prepared_packets(
     crypto: &SharedTransportCrypto,
     packets: Vec<PreparedRTPPacket>,
     sink: &dyn PacketSink,
     burst_size: usize,
     burst_interval: f64,
+    smooth_spread: Option<Duration>,
 ) -> Result<(usize, usize), SendError> {
-    let should_burst = burst_size > 0 && burst_interval > 0.0;
+    let total = packets.len();
+    let should_burst = smooth_spread.is_none() && burst_size > 0 && burst_interval > 0.0;
     let burst_started_at = Instant::now();
     let burst_interval = if should_burst {
         Some(Duration::from_secs_f64(burst_interval))
@@ -258,6 +280,12 @@ fn send_prepared_packets(
         {
             let target_burst = sent / burst_size;
             wait_until(burst_started_at + duration.mul_f64(target_burst as f64));
+        }
+
+        if let Some(spread) = smooth_spread
+            && sent > 0
+        {
+            wait_until(burst_started_at + spread.mul_f64(sent as f64 / total as f64));
         }
 
         sink.send_packet(packet.as_slice())?;
@@ -425,6 +453,7 @@ impl VideoSendPipeline {
         media_stream_type: &str,
         burst_size: usize,
         burst_interval: f64,
+        pacing: VideoPacing,
     ) -> Result<VideoSendSummary, SendError> {
         let _send_guard = lock_send(&self.send_lock)?;
         let prepared = {
@@ -437,8 +466,15 @@ impl VideoSendPipeline {
                 media_stream_type,
             )?
         };
-        let (sent, octets) =
-            send_prepared_packets(crypto, prepared.packets, sink, burst_size, burst_interval)?;
+        let smooth = (pacing == VideoPacing::Smooth).then(|| smooth_spread(frame_time_ms));
+        let (sent, octets) = send_prepared_packets(
+            crypto,
+            prepared.packets,
+            sink,
+            burst_size,
+            burst_interval,
+            smooth,
+        )?;
         Ok(VideoSendSummary {
             sent,
             octets,
@@ -470,7 +506,7 @@ impl VideoSendPipeline {
         } = prepared;
         let sent = match packet {
             Some(packet) => {
-                let (sent, _) = send_prepared_packets(crypto, vec![packet], sink, 0, 0.0)?;
+                let (sent, _) = send_prepared_packets(crypto, vec![packet], sink, 0, 0.0, None)?;
                 sent > 0
             }
             None => false,
@@ -500,7 +536,14 @@ impl VideoSendPipeline {
             state.prepare_video_rtx_for_nack_inner(payload, media_stream_type)?
         };
         let summary = prepared.summary;
-        let _ = send_prepared_packets(crypto, prepared.packets, sink, burst_size, burst_interval)?;
+        let _ = send_prepared_packets(
+            crypto,
+            prepared.packets,
+            sink,
+            burst_size,
+            burst_interval,
+            None,
+        )?;
         Ok(summary)
     }
 }

@@ -27,6 +27,7 @@ use relay_media::codec::VoiceCodec;
 use relay_voice::connection::RtcSettings;
 use relay_voice::publish::VideoParams;
 use relay_voice::receive::{MediaType, Packet, ReceiveHealth, RtpObservation};
+use relay_voice::video::VideoPacing;
 use relay_voice::voice_ws::{StreamSpec, video_codec_list};
 use relay_voice::{ClientEvent, JoinOptions, StreamClient, VoiceClient, VoiceClientConfig};
 use serde_json::{Value, json};
@@ -40,6 +41,7 @@ use crate::api::{
 use crate::cache::{Cache, CacheChange, SharedCache, StreamKey, StreamState, VoiceStateEntry};
 use crate::codecs::{
     ALL_VIDEO_CODECS, adaptive_decode_codecs, decode_codecs, output_settings, parse_names,
+    video_pacing,
 };
 use crate::ingress::{AudioStats, ingress_audio, ingress_video};
 use crate::link::{link_event, snowflake};
@@ -79,6 +81,7 @@ pub struct AdapterOptions {
     pub parent_codecs: Vec<VoiceCodec>,
     pub watch_codecs: Vec<VoiceCodec>,
     pub network_stats: bool,
+    pub video_pacing: VideoPacing,
     pub self_deaf: bool,
     pub urls: Urls,
     pub connect_timeout: Duration,
@@ -108,6 +111,7 @@ impl AdapterOptions {
             parent_codecs: list(cfg.codecs.effective_parent_codecs()),
             watch_codecs: list(cfg.codecs.effective_watch_codecs()),
             network_stats: cfg.logging.network_stats,
+            video_pacing: video_pacing(cfg.runtime.video_pacing),
             self_deaf: cfg.runtime.self_deaf_ingest,
             urls: Urls::default(),
             connect_timeout: CONNECT_TIMEOUT,
@@ -1207,7 +1211,13 @@ impl Inner {
             .vc
             .clone()
             .ok_or_else(|| AdapterError::failed("not in voice"))?;
-        let settings = output_settings(adaptive, fps, self.opts.network_stats, &net.user_agent);
+        let settings = output_settings(
+            adaptive,
+            fps,
+            self.opts.network_stats,
+            &net.user_agent,
+            self.opts.video_pacing,
+        );
         if adaptive {
             // op 14 can land before create_stream returns: the hook must already be in place
             let key = StreamKey::Guild {

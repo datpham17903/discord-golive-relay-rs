@@ -48,6 +48,11 @@ th { color: var(--muted); font-weight: 600; border-top: 0; }
 .tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); }
 .tag.ok { color: var(--ok); border-color: var(--ok); } .tag.warn { color: var(--warn); border-color: var(--warn); }
 .tag.bad { color: var(--bad); border-color: var(--bad); } .tag.idle { color: var(--muted); }
+.pager { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 12px; }
+.pager[hidden] { display: none; }
+.pager button { font: inherit; font-size: 13px; color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 4px 12px; cursor: pointer; }
+.pager button:hover:not(:disabled) { border-color: var(--muted); }
+.pager button:disabled { opacity: .4; cursor: default; }
 .cmd { display: grid; grid-template-columns: minmax(0, 260px) 1fr; gap: 6px 16px; align-items: start; }
 .cmd code { background: var(--code); padding: 3px 8px; border-radius: 6px; font: 13px/1.6 ui-monospace, Consolas, monospace; display: inline-block; cursor: pointer; word-break: break-all; }
 .cmd code:hover { outline: 1px solid var(--line); }
@@ -121,6 +126,11 @@ th { color: var(--muted); font-weight: 600; border-top: 0; }
       <thead><tr><th>Bắt đầu</th><th>Kéo dài</th><th>Sự cố</th><th>Kết quả</th></tr></thead>
       <tbody id="incidents"><tr><td colspan="4" class="muted">Chưa có dữ liệu</td></tr></tbody>
     </table>
+    <div class="pager" id="inc-pager" hidden>
+      <button type="button" id="inc-prev">‹ Trước</button>
+      <span class="muted" id="inc-page"></span>
+      <button type="button" id="inc-next">Sau ›</button>
+    </div>
   </section>
 
   <section class="card">
@@ -259,9 +269,19 @@ function drawChart(series, now) {
   $("chart").innerHTML = bands + grid + `<path d="${path}" fill="none" stroke="var(--chart)" stroke-width="1.6" vector-effect="non-scaling-stroke"/>`;
 }
 
+const INC_PER_PAGE = 10;
+let incPage = 0, incList = [], incNow = 0;
+
 function drawIncidents(list, now) {
+  incList = list; incNow = now;
+  const pages = Math.max(1, Math.ceil(list.length / INC_PER_PAGE));
+  incPage = Math.min(incPage, pages - 1);
+  $("inc-pager").hidden = pages < 2;
+  $("inc-page").textContent = `Trang ${incPage + 1}/${pages}`;
+  $("inc-prev").disabled = incPage === 0;
+  $("inc-next").disabled = incPage === pages - 1;
   if (!list.length) { $("incidents").innerHTML = `<tr><td colspan="4" class="muted">Chưa ghi nhận sự cố nào</td></tr>`; return; }
-  $("incidents").innerHTML = list.slice(0, 20).map(i => {
+  $("incidents").innerHTML = list.slice(incPage * INC_PER_PAGE, (incPage + 1) * INC_PER_PAGE).map(i => {
     const kind = KINDS[i.kind] || i.kind;
     const why = REASONS[i.reason] ? ` (${REASONS[i.reason]})` : "";
     const dur = i.kind === "restart" ? "—" : fmtDur((i.ongoing ? now : i.end) - i.start);
@@ -281,6 +301,8 @@ async function tick() {
     $("updated").textContent = "Mất kết nối tới trang trạng thái, đang thử lại…";
   }
 }
+$("inc-prev").addEventListener("click", () => { incPage = Math.max(0, incPage - 1); drawIncidents(incList, incNow); });
+$("inc-next").addEventListener("click", () => { incPage++; drawIncidents(incList, incNow); });
 document.querySelectorAll(".cmd code").forEach(c => c.addEventListener("click", () => {
   const t = c.textContent;
   navigator.clipboard?.writeText(t).then(() => { c.textContent = "Đã sao chép"; setTimeout(() => c.textContent = t, 900); });

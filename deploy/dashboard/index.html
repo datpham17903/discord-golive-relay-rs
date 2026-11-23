@@ -59,6 +59,9 @@ th { color: var(--muted); font-weight: 600; border-top: 0; }
 .cmd div { padding: 4px 0; }
 .note { margin-top: 12px; padding: 10px 12px; border-left: 3px solid var(--info); background: var(--code); border-radius: 6px; font-size: 14px; }
 @media (max-width: 560px) { .cmd { grid-template-columns: 1fr; } .cmd div:nth-child(2n) { padding-top: 0; margin-bottom: 8px; } }
+footer { margin-top: 24px; text-align: center; }
+footer a { color: var(--info); text-decoration: none; }
+footer a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -147,6 +150,7 @@ th { color: var(--muted); font-weight: 600; border-top: 0; }
     <div class="note">Chỉ <b>người đã tạo mirror</b> hoặc <b>operator</b> mới gỡ được mirror đó. Các lệnh còn lại (bật/tắt, đổi target, đổi kênh…) chỉ operator dùng được. Mỗi người cần chờ vài giây giữa hai lệnh.</div>
     <p class="muted">Lấy ID kênh: bật Developer Mode trong Cài đặt → Nâng cao, rồi chuột phải vào kênh → Sao chép ID.</p>
   </section>
+  <footer class="muted">Mã nguồn: <a href="https://github.com/datpham17903/discord-golive-relay-rs" target="_blank" rel="noopener noreferrer">datpham17903/discord-golive-relay-rs</a></footer>
 </main>
 <script>
 const STATES = {

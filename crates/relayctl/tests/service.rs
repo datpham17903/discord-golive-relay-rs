@@ -2373,6 +2373,38 @@ service_test!(
 );
 
 service_test!(
+    test_session_invalid_watch_retries_fast_without_rejoining,
+    async {
+        let env = env(Setup::default());
+        let task = env.start();
+        wait_until(|| env.adapter_started(0)).await;
+        let a = env.adapter(0);
+        let a2 = Arc::clone(&a);
+        *a.watch_hook.lock() = Some(Arc::new(move || {
+            a2.push("watch");
+            let first = a2.count("watch") == 1;
+            Box::pin(async move {
+                if first {
+                    // live: the stream server closes the watch handshake as the target starts
+                    Err(AdapterError::Voice(VoiceError::Closed {
+                        code: Some(4006),
+                        reason: "Session is no longer valid.".into(),
+                    }))
+                } else {
+                    Ok(())
+                }
+            })
+        }));
+        a.emit(env.snapshot());
+        wait_until_t(|| a.count("watch") == 2, 3.0).await;
+        assert_eq!(a.count("join"), 1);
+        assert!(!env.order().contains(&"leave".into()));
+        env.shutdown(task).await;
+        assert_eq!(env.timings()[0]["outcome"], json!("connect_failed"));
+    }
+);
+
+service_test!(
     test_watch_is_sent_on_voice_state_echo_before_voice_connects,
     async {
         let env = env(Setup::default());
@@ -2516,13 +2548,21 @@ service_test!(test_worker_spawned_after_teardown_is_stopped, async {
 });
 
 #[test]
-fn test_watch_retryable_only_for_stream_full_or_timeout() {
+fn test_watch_retryable_only_for_stream_full_timeout_or_4006() {
     assert!(watch_retryable(&AdapterError::Voice(
         VoiceError::StreamRejected("stream_full".into())
     )));
     assert!(watch_retryable(&AdapterError::Voice(VoiceError::Timeout(
         "watching the stream"
     ))));
+    assert!(watch_retryable(&AdapterError::Voice(VoiceError::Closed {
+        code: Some(4006),
+        reason: "Session is no longer valid.".into(),
+    })));
+    assert!(!watch_retryable(&AdapterError::Voice(VoiceError::Closed {
+        code: Some(4014),
+        reason: "Disconnected.".into(),
+    })));
     assert!(!watch_retryable(&AdapterError::Voice(
         VoiceError::StreamRejected("unauthorized".into())
     )));

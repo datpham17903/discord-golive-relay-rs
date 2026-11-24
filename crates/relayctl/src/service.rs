@@ -249,11 +249,22 @@ pub fn persisted_view(st: &PersistedState) -> PersistedStateView {
     }
 }
 
-/// Fast watch retry only for a slot race: a stream_full refusal or a watch timeout. Any other
-/// refusal (unauthorized, invalid_channel, ...) or error keeps normal backoff.
+/// Fast watch retry only for a slot race (a stream_full refusal or a watch timeout) or a stream
+/// server closing the watch handshake with 4006: seen live while the ingest was already in voice as
+/// the target started, with the parent voice connection unaffected, so the watch is retried on it
+/// (the machine still rebuilds voice after repeated fast failures). Any other refusal
+/// (unauthorized, invalid_channel, ...) or error keeps normal backoff.
 pub fn watch_retryable(exc: &AdapterError) -> bool {
-    matches!(exc, AdapterError::Voice(VoiceError::Timeout(_)))
-        || exc.to_string().contains("stream_full")
+    matches!(
+        exc,
+        AdapterError::Voice(
+            VoiceError::Timeout(_)
+                | VoiceError::Closed {
+                    code: Some(4006),
+                    ..
+                }
+        )
+    ) || exc.to_string().contains("stream_full")
 }
 
 fn quarantine_json(rec: &QuarantineRecord) -> JsonObject {
